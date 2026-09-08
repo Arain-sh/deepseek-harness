@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-tool-pwsh` gives the agent a `pwsh` tool that runs PowerShell commands through the mounted shell executor — the Windows counterpart of `dsh-tool-bash`, mirroring it call-for-call. Each call runs in a fresh pwsh process, so no state survives; `run_in_background` turns long-running commands into background jobs. Commands are PowerShell-dialect: native `C:\...` paths and `$env:NAME` variables, with no dialect translation. Every call runs with the managed `DSH_*` environment, and under a sandboxing executor the tool teaches and enforces the Windows-specific language-mode and named-pipe contracts. Mount it with a PowerShell executor such as `dsh-pwsh-local` and the `dsh-shell-env` plugin.
+`dsh-tool-pwsh` gives the agent a `pwsh` tool that runs PowerShell commands through the mounted shell executor — the Windows counterpart of `dsh-tool-bash`, mirroring it call-for-call. Each call runs in a fresh pwsh process, so no state survives; `run_in_background` turns long-running commands into background jobs. Commands are PowerShell-dialect: native `C:\...` paths and `$env:NAME` variables, with no dialect translation. Every call runs with the managed `DSH_*` environment, and under a sandboxing executor the tool teaches and enforces the Windows-specific language-mode and named-pipe contracts. Mount it with a PowerShell executor such as `dsh-pwsh-local` and the `dsh-shell-env` plugin. The optional [`dsh-shell-exec-env`](../shell-exec-env/README.md) registry is discovered dynamically rather than injected, so its absence never delays the tool.
 
 ## Table of Contents
 
@@ -52,6 +52,8 @@ The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-a
 ### Running a command
 
 The tool executes `pwsh -Command <command>` and returns the combined output. Commands run in a fresh pwsh process every call, so state never persists — pass `workdir` instead of `cd`. Paths use native Windows form and environment variables are read with `$env:NAME`. A non-zero exit is reported as `[exit code: N]`; on Windows a force-killed command settles as `[exit code: 1]` without a signal marker, so the agent treats a bare exit 1 after an interruption as a termination, not a command failure. Background runs, output truncation, and the `description`/`timeoutMs`/`workdir` arguments behave exactly as in `dsh-tool-bash`.
+
+When `ctx.shellExecEnv` is present, the tool also awaits a fresh trusted capability snapshot after approval and before process creation. Those non-`DSH_*` values pass through `ShellExecRequest.env`; a resolver failure prevents the process from starting. They are not listed in the prompt or the tool schema, and model-supplied extra arguments cannot add or replace them.
 
 ### Windows-specific sandbox behavior
 

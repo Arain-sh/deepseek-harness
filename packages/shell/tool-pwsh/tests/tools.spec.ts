@@ -32,6 +32,7 @@ import { turnBoundaryProjectionDefinition } from '@deepseek-ai/dsh-agent-loop'
 import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
 import * as ToolPwsh from '@deepseek-ai/dsh-tool-pwsh'
 import * as BashEnvPlugin from '@deepseek-ai/dsh-shell-env'
+import ShellExecEnvironmentRegistry from '@deepseek-ai/dsh-shell-exec-env'
 import type { ShellProcessRead } from '@deepseek-ai/dsh-shell'
 import { processOutcome } from '../src/background.ts'
 import { renderPwshProcessRead, renderPwshResult } from '../src/render.ts'
@@ -392,6 +393,18 @@ describe('argument validation', () => {
 })
 
 describe('execution through the bash seam', () => {
+  it('collects optional trusted environment contributions', async () => {
+    const { ctx, bash } = await setup()
+    await ctx.plugin(ShellExecEnvironmentRegistry)
+    ctx.shellExecEnv.register({
+      name: 'test-capability',
+      keys: ['TEST_CAPABILITY'],
+      resolve: () => ({ TEST_CAPABILITY: 'current-value' }),
+    })
+    await call(ctx, 'pwsh', { command: 'Write-Output ok', description: 'read capability' })
+    expect(bash.requests[0]?.env).toEqual({ TEST_CAPABILITY: 'current-value' })
+  })
+
   it('forwards command, session cwd, timeout, and managed DSH_* environment', async () => {
     const dshHome = mkdtempSync(join(tmpdir(), 'dsh-tool-pwsh-home-'))
     tempDirs.push(dshHome)

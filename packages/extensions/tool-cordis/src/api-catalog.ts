@@ -2134,6 +2134,25 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'shellExecEnv',
+    summary: 'Effect-owned registry collected afresh for every Bash or Pwsh call.',
+    description: 'Effect-owned registry collected afresh for every Bash or Pwsh call.',
+    methods: [
+      {
+        signature: 'register(contributor: ShellExecEnvironmentContributor): () => void',
+        description: 'Register one exact environment owner.',
+        parameters: [{ name: 'contributor', description: 'declared keys and their execution-time resolver.' }],
+        returns: 'the exact contribution disposer.',
+      },
+      {
+        signature: 'async collect(execution: ToolExecution): Promise<Readonly<Record<string, string>>>',
+        description: 'Collect the current trusted environment snapshot. Provider failures reject the shell call before a child process starts.',
+        parameters: [{ name: 'execution', description: 'current shell Tool execution.' }],
+        returns: 'an immutable, key-sorted environment map.',
+      },
+    ],
+  },
+  {
     key: 'skills',
     summary: 'Layered registry of skill providers, the host+per-scope shape the tools registry established.',
     description: 'Layered registry of skill providers, the host+per-scope shape the tools registry established. A registration files into the layer of its calling context\'s scope (scopeOf): host rows and repository plugins land in the global layer, while a plugin mounted by an agent preset\'s standing composition lands in that preset\'s layer. A read merges the global layer with the viewing scope\'s chain — the nearest layer\'s entry wins a duplicate name outright, and the rank order decides duplicates only within one layer. It exposes sorted invocation-neutral summaries and loads full skill bodies on demand.',
@@ -5465,6 +5484,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SettingsUpdateSource',
     declaration: 'export type SettingsUpdateSource = \'update\' | \'provider\';',
+  },
+  {
+    name: 'ShellExecEnvironmentContributor',
+    declaration: 'export interface ShellExecEnvironmentContributor {\n    readonly name: string;\n    readonly keys: readonly string[];\n    resolve(execution: ToolExecution): Promise<Readonly<Record<string, string>>> | Readonly<Record<string, string>>;\n}',
   },
   {
     name: 'ShellExecRequest',

@@ -10,6 +10,12 @@ bash 执行 seam 分为 Service Definition（[dsh-shell](../../packages/shell/sh
 
 `DSH_*` 变量是归 Harness 所有的子进程事实。面向模型的 bash 工具通过 `ctx.shellEnv` 收集它们，再经由 `ShellExecRequest.dshEnv` 传递；子进程服务在合并当前快照之前会移除继承而来的 `DSH_*` 名称。`DshEnvironmentKey`／`DshEnvironment` 词汇归[子进程 seam](subprocess.zh.md)所有，由 `dsh-shell` 重导出。
 
+## 可信执行能力
+
+[`dsh-shell-exec-env`](../../packages/shell/shell-exec-env) 可选地注册 `ctx.shellExecEnv`，供可信插件逐次工具执行解析非 `DSH_*` 值。`dsh-tool-bash` 与 `dsh-tool-pwsh` 会发现该服务，但不把它设为必需注入项；它们在审批完成后等待一份新快照，再通过 `ShellExecRequest.env` 传递。解析器拒绝会阻止进程创建。模型无法枚举注册表，也无法通过任一工具 schema 提供 `env`。
+
+分离的两个注册表保留了不同策略：`ctx.shellEnv` 拥有保留命名空间内可枚举的 Harness 事实，`ctx.shellExecEnv` 携带不可枚举、可能形似凭证的能力。两者都不使用全局 `process.env`；本地执行器先合并普通能力值，再合并托管的 `DSH_*` 快照。
+
 ## 请求与规格：`resolve()` 拆分
 
 该 seam 将**面向模型/插件的请求**（`workdir`/`timeoutMs`/`stdoutMaxBytes` 可选，由配置或请求策略补全）与执行器实际使用的**完全解析后的 spec**（这些字段均为必填）分开。工具层在二者之间调用 `ctx.shell.resolve(request)`（仓库的「包边界处显式优于隐式」规则）；`ShellExecSpec` 携带的是已解析的值。
@@ -303,4 +309,31 @@ list(): BashEnvVariableInfo[]
 Types: [DshEnvironment](subprocess.zh.md) · [ToolExecution](tools.zh.md)
 
 Source: [`packages/shell/shell-env/src/index.ts`](../../packages/shell/shell-env/src/index.ts)
+
+<a id="ctxshellexecenv--shellexecenvironmentregistry"></a>
+
+### `ctx.shellExecEnv` — `ShellExecEnvironmentRegistry`
+
+Effect-owned registry collected afresh for every Bash or Pwsh call.
+
+```ts cordis-catalog
+/**
+ * Register one exact environment owner.
+ * @param contributor - declared keys and their execution-time resolver.
+ * @returns the exact contribution disposer.
+ */
+register(contributor: ShellExecEnvironmentContributor): () => void
+
+/**
+ * Collect the current trusted environment snapshot. Provider failures reject
+ * the shell call before a child process starts.
+ * @param execution - current shell Tool execution.
+ * @returns an immutable, key-sorted environment map.
+ */
+async collect(execution: ToolExecution): Promise<Readonly<Record<string, string>>>
+```
+
+Types: [ToolExecution](tools.zh.md)
+
+Source: [`packages/shell/shell-exec-env/src/index.ts`](../../packages/shell/shell-exec-env/src/index.ts)
 <!-- END GENERATED cordis-surface -->

@@ -28,6 +28,7 @@ import { HarnessError } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-shell-env'
+import type {} from '@deepseek-ai/dsh-shell-exec-env'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type { SandboxExecutionPolicy, SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import { ESCALATION_TARGETS, approveEscalation, validateEscalationArgs } from '@deepseek-ai/dsh-sandbox'
@@ -354,18 +355,24 @@ export function apply(ctx: Context, config: Config = {}): void {
         ? standingPolicy
         : { ...(standingPolicy as SandboxExecutionPolicy), mode: approvedMode }
       const workdir = resolveWorkdir(args.workdir, exec)
+      if (args.run_in_background === true) {
+        if (!backgroundEnabled) {
+          throw new Error('run_in_background is disabled for this deployment (enableRunInBackground: false)')
+        }
+        if (ctx.get('jobs') === undefined) {
+          throw new Error('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs')
+        }
+      }
+      const env = await ctx.get('shellExecEnv')?.collect(exec)
       const request = {
         command: args.command,
         ...workdir !== undefined ? { workdir } : {},
         ...args.timeoutMs !== undefined ? { timeoutMs: args.timeoutMs } : {},
+        ...env !== undefined && Object.keys(env).length > 0 ? { env: { ...env } } : {},
         dshEnv: ctx.shellEnv.collect(exec),
         ...policy !== undefined ? { sandboxPolicy: policy } : {},
       }
       if (args.run_in_background === true) {
-        // Undeclared keys are allowed, so schema omission also needs enforcement.
-        if (!backgroundEnabled) {
-          throw new Error('run_in_background is disabled for this deployment (enableRunInBackground: false)')
-        }
         const jobs = ctx.get('jobs')
         if (jobs === undefined) {
           throw new Error('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs')

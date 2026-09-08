@@ -10,6 +10,12 @@ Source: [`packages/shell/shell/src/types.ts`](../../packages/shell/shell/src/typ
 
 `DSH_*` variables are Harness-owned child-process facts. The model-facing bash tool collects them through `ctx.shellEnv` and passes them through `ShellExecRequest.dshEnv`; the subprocess service removes inherited `DSH_*` names before merging the current snapshot. The `DshEnvironmentKey`/`DshEnvironment` vocabulary is owned by the [subprocess seam](subprocess.md) and re-exported by `dsh-shell`.
 
+## Trusted execution capabilities
+
+[`dsh-shell-exec-env`](../../packages/shell/shell-exec-env) optionally registers `ctx.shellExecEnv` for non-`DSH_*` values that a trusted plugin resolves per Tool execution. `dsh-tool-bash` and `dsh-tool-pwsh` discover the service without making it a required injection, await one fresh snapshot after approval, and pass it through `ShellExecRequest.env`. A resolver rejection prevents process creation. The model cannot enumerate the registry or supply `env` through either Tool schema.
+
+The separate registries preserve two policies: `ctx.shellEnv` owns enumerable Harness facts in the reserved namespace, while `ctx.shellExecEnv` carries non-enumerable, potentially credential-shaped capabilities. Both avoid global `process.env`; the local executor merges ordinary capability values before the managed `DSH_*` snapshot.
+
 ## Request vs. spec: the `resolve()` split
 
 The seam separates the **model-/plugin-facing request** (optional `workdir`/`timeoutMs`/`stdoutMaxBytes`, filled from config or request policy) from the **fully-resolved spec** the executor acts on (those fields required). The tool layer calls `ctx.shell.resolve(request)` between them (the repo's "explicit > implicit at package boundaries" rule); a `ShellExecSpec` carries resolved values.
@@ -303,4 +309,31 @@ list(): BashEnvVariableInfo[]
 Types: [DshEnvironment](subprocess.md) · [ToolExecution](tools.md)
 
 Source: [`packages/shell/shell-env/src/index.ts`](../../packages/shell/shell-env/src/index.ts)
+
+<a id="ctxshellexecenv--shellexecenvironmentregistry"></a>
+
+### `ctx.shellExecEnv` — `ShellExecEnvironmentRegistry`
+
+Effect-owned registry collected afresh for every Bash or Pwsh call.
+
+```ts cordis-catalog
+/**
+ * Register one exact environment owner.
+ * @param contributor - declared keys and their execution-time resolver.
+ * @returns the exact contribution disposer.
+ */
+register(contributor: ShellExecEnvironmentContributor): () => void
+
+/**
+ * Collect the current trusted environment snapshot. Provider failures reject
+ * the shell call before a child process starts.
+ * @param execution - current shell Tool execution.
+ * @returns an immutable, key-sorted environment map.
+ */
+async collect(execution: ToolExecution): Promise<Readonly<Record<string, string>>>
+```
+
+Types: [ToolExecution](tools.md)
+
+Source: [`packages/shell/shell-exec-env/src/index.ts`](../../packages/shell/shell-exec-env/src/index.ts)
 <!-- END GENERATED cordis-surface -->

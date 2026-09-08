@@ -33,6 +33,9 @@
       "path": "../../shell/shell-env"
     },
     {
+      "path": "../../shell/shell-exec-env"
+    },
+    {
       "path": "../../jobs/jobs"
     },
     {
