@@ -257,6 +257,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     ctx.effect(() => {
       return () => this._optionalPersistenceFiber.dispose()
     }, 'sessionQuerySqlite.optionalPersistence')
+    ctx.on('session-persistence/deleted', id => this._removeDeletedSession(id))
     ctx.effect(() => async () => this.close(), 'sessionQuerySqlite.close')
   }
 
@@ -577,6 +578,39 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
       db.prepare('DELETE FROM temp.live_docs WHERE session_id = ?').run(id)
       db.prepare('DELETE FROM temp.live_sessions WHERE id = ?').run(id)
     }
+  }
+
+  /** Remove one committed persistence deletion from an already-open derived index. */
+  private _removeDeletedSession(id: SessionId): Promise<void> {
+    if (this._ready === undefined || this._isClosed()) return Promise.resolve()
+    return this._serialized(undefined, async () => {
+      await this._ensureReady(undefined)
+      const db = this._requireDb()
+      const persisted = db.prepare('SELECT 1 AS present FROM persisted_sessions WHERE id = ?').get(id) !== undefined
+      const live = db.prepare('SELECT 1 AS present FROM temp.live_sessions WHERE id = ?').get(id) !== undefined
+      if (!persisted && !live) return
+      const nextMainGeneration = persisted ? this._mainGeneration() + 1 : this._mainGeneration()
+      let began = false
+      try {
+        db.exec('BEGIN IMMEDIATE')
+        began = true
+        if (persisted) this._deleteSession('persisted', id)
+        if (live) this._deleteSession('live', id)
+        if (persisted) {
+          db.prepare('UPDATE search_state SET global_generation = ? WHERE singleton = 1').run(nextMainGeneration)
+        }
+        db.exec('COMMIT')
+      } catch (error: unknown) {
+        if (began) db.exec('ROLLBACK')
+        throw new SessionQueryError(
+          `session-search deletion cleanup failed for "${id}": ${errorMessage(error)}`,
+          'SESSION_QUERY_INDEX_FAILED',
+          { cause: error },
+        )
+      }
+      this._globalGeneration += 1
+      this._localGeneration = Math.max(this._localGeneration, nextMainGeneration) + 1
+    })
   }
 
   private _replacePersistedSession(

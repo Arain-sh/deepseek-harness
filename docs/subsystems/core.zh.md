@@ -769,6 +769,15 @@ async create(options: CreateAgentOptions): Promise<AgentHandle>
 async resume(options: ResumeAgentOptions): Promise<AgentHandle>
 
 /**
+ * Atomically reserve a registry-owned Agent for idle disposal without
+ * exposing its teardown handle. Agents registered directly or created by a
+ * configuration helper have no retained handle and return `unowned`.
+ * @param sessionId - live Agent identity to claim.
+ * @returns claimed reservation, busy state, or missing ownership.
+ */
+reserveIdleDisposal(sessionId: SessionId): AgentIdleDisposalAttempt
+
+/**
  * Register a live agent. Throws if an agent with the same id is already
  * registered. Emits `agent/created` on registration and `agent/disposed`
  * when the calling fiber is disposed — both with the agent's scope carrier

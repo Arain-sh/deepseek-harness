@@ -106,9 +106,30 @@ export interface SessionPersistenceListOptions {
   readonly signal?: AbortSignal
 }
 
+/** Options for {@link SessionPersistence.delete}. */
+export interface SessionPersistenceDeleteOptions {
+  /** Optional cancellation observed before the durable removal commits. */
+  readonly signal?: AbortSignal
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     sessionPersistence: SessionPersistence
+  }
+
+  interface Events {
+    /**
+     * Post-commit notification that one stored session was permanently
+     * removed. Derived read models (search indexes, projection caches,
+     * workspace accounting) drop their row from this event; a listener
+     * failure is contained and cannot reverse the storage commit, so a
+     * listener must be idempotent and must not assume the record is still
+     * readable. Only the identity travels: by the time this fires the log is
+     * gone, so a header would name bytes no reader can reach.
+     * @param sessionId - the permanently deleted session identity.
+     * @mode parallel
+     */
+    'session-persistence/deleted'(sessionId: SessionId): Promise<void> | void
   }
 }
 
@@ -133,6 +154,14 @@ declare module '@deepseek-ai/cordis' {
  * on this backend instance observe at least that prefix.
  */
 export abstract class SessionPersistence extends Service {
+  /**
+   * Whether this backend implements permanent single-session deletion.
+   * Consumers probe this before starting a deletion transaction; the
+   * defaulted {@link delete} below rejects, so a backend that does not
+   * override both cannot silently claim support.
+   */
+  readonly supportsDeletion: boolean = false
+
   constructor(ctx: Context) {
     super(ctx, 'sessionPersistence')
   }
@@ -160,6 +189,53 @@ export abstract class SessionPersistence extends Service {
    * @throws {SessionAlreadyOwnedError} for `write` when ownership is taken.
    */
   abstract open(id: SessionId, access: SessionAccess, options?: SessionPersistenceOpenOptions): Promise<SessionHandle>
+
+  /**
+   * Permanently remove one stored session and everything the backend holds
+   * for it. Whole-session removal is id-addressed like `create`/`stat`/`list`
+   * — it has no slice semantics and no handle could survive it — and it
+   * answers absence the way `stat` does, with `undefined` rather than a
+   * refusal.
+   *
+   * Implementations take the same single-writer claim `open(id, 'write')`
+   * takes, so an active owner rejects instead of losing its bytes underneath
+   * it; the removal is durable when the returned promise resolves, and
+   * repeating it on an already-removed id is a no-op. On success the backend
+   * publishes `session-persistence/deleted` post-commit (see
+   * {@link emitDeleted}).
+   *
+   * The default rejects: deletion is opt-in, so a third-party backend keeps
+   * compiling and keeps `supportsDeletion` false.
+   * @param _id - the stored session to remove.
+   * @param _options - optional cancellation.
+   * @returns the removed session's stored header, or `undefined` when the
+   *   session did not exist — or when it did, but its stored header was
+   *   unreadable (an unsupported format generation, say): an artifact this
+   *   build cannot interpret must still be removable, so a refusal costs the
+   *   caller the header, never the removal. `stat` conflates the two the same
+   *   way; `session-persistence/deleted` is the authoritative signal that
+   *   something was removed.
+   * @throws {SessionAlreadyOwnedError} while a write handle owns the id.
+   */
+  delete(_id: SessionId, _options?: SessionPersistenceDeleteOptions): Promise<SessionHeader | undefined> {
+    return Promise.reject(new Error(`${this.name}: this session persistence backend does not support permanent Session deletion`))
+  }
+
+  /**
+   * Publish a committed deletion without letting an observer failure reverse
+   * it: the bytes are already gone, so a rejecting listener is logged and
+   * contained. Backends call this immediately after the durable removal
+   * commits.
+   * @param id - the permanently deleted session identity.
+   * @returns resolution once every listener settled.
+   */
+  protected async emitDeleted(id: SessionId): Promise<void> {
+    try {
+      await this.ctx.parallel('session-persistence/deleted', id)
+    } catch (error: unknown) {
+      this.ctx.logger.warn(`session "${id}": session-persistence/deleted listener rejected: ${String(error)}`)
+    }
+  }
 
   /**
    * Flush every active write handle owned by this service instance in one

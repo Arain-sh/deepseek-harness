@@ -61,6 +61,65 @@ function disposeCurrentLifecycle(ownerCtx: Context): void {
 }
 
 describe('agent scope lifecycle', () => {
+  it('reserves a truly idle handle against new work and follows ordinary disposal', async () => {
+    const ctx = await harness()
+    const sessionId = SessionId('idle-disposal-claim')
+    const handle = await ctx.agents.create({
+      sessionId,
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+
+    const claim = handle.reserveIdleDisposal?.()
+    expect(claim).toBeDefined()
+    expect(() => {
+      handle.agent.followup(createUserMessage({
+        content: text('too late'),
+        source: { kind: 'user' },
+      }))
+    }).toThrow(/reserved for permanent deletion/)
+    await claim?.dispose()
+    expect(ctx.agents.get(sessionId)).toBeUndefined()
+    expect(ctx.sessions.get(sessionId)).toBeUndefined()
+    await ctx.fiber.dispose()
+  })
+
+  it('refuses an idle-disposal claim during maintenance without cancelling it', async () => {
+    const ctx = await harness()
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('maintenance-disposal-refusal'),
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    const gate = Promise.withResolvers<undefined>()
+    const maintenance = handle.agent.runMaintenance(async () => gate.promise)
+
+    expect(handle.reserveIdleDisposal?.()).toBeUndefined()
+    expect(ctx.agents.get(handle.agent.id)).toBe(handle.agent)
+    gate.resolve(undefined)
+    await maintenance
+    await handle.dispose()
+    await ctx.fiber.dispose()
+  })
+
+  it('refuses an idle-disposal claim while queued input remains pending', async () => {
+    const ctx = await harness()
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('queued-disposal-refusal'),
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    handle.agent.inject(createUserMessage({
+      content: text('pending context'),
+      source: { kind: 'plugin', plugin: 'test' },
+    }))
+
+    expect(handle.reserveIdleDisposal?.()).toBeUndefined()
+    handle.agent.cancel({ kind: 'user' })
+    const claim = handle.reserveIdleDisposal?.()
+    expect(claim).toBeDefined()
+    claim?.release()
+    await handle.dispose()
+    await ctx.fiber.dispose()
+  })
+
   it('rejects an already-aborted creation signal before publishing either object', async () => {
     const ctx = await harness()
     const reason = new Error('cancelled before creation')

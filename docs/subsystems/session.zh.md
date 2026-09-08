@@ -941,6 +941,34 @@ get(id: SessionId): Session | undefined
 list(): Session[]
 
 /**
+ * Whether an active Host deletion reservation currently owns one exact id.
+ * Activity entry points consult this before prompting or resuming an
+ * existing live Agent; Session publication performs the stronger lineage
+ * check instead.
+ * @param id - Session identity to inspect.
+ * @returns whether a deletion currently fences the id.
+ */
+isDeletionReserved(id: SessionId): boolean
+
+/**
+ * Reserve a root and its known subtree against Session publication for one
+ * deletion transaction. The provider may {@link
+ * SessionDeletionReservation.extend} the set while repeated persistence
+ * snapshots converge on the real lineage; overlapping reservations reject
+ * synchronously, so two deletions can never share an identity.
+ *
+ * The reservation is a fence, not a lock on storage: it stops NEW
+ * publication of the subtree, while the durable removal is excluded by
+ * persistence's own single-writer claim.
+ * @param rootSessionId - subtree root.
+ * @param initialSessionIds - the root and already-discovered descendants.
+ * @returns the single-shot reservation capability; always `release()` it.
+ * @throws {SessionDeletionReservationError} `OVERLAPPING_SESSION_DELETION`
+ *   when another active reservation already holds one of these identities.
+ */
+reserveForDeletion( rootSessionId: SessionId, initialSessionIds: readonly SessionId[] = [rootSessionId], ): SessionDeletionReservation
+
+/**
  * Create a live child session from a stable prefix of a live source.
  * `boundary` is an inclusive source event seq; omitted means the source's
  * current last event. The selected slice may end with a between-turn event
@@ -999,6 +1027,28 @@ A Session became visible to Session list consumers.
  */
 'api-session/added'(summary: SessionSummary): void
 ```
+
+Source: [`packages/api/session-controller/src/types.ts`](../../packages/api/session-controller/src/types.ts)
+
+<a id="api-sessiondeleted--emit"></a>
+
+#### `api-session/deleted` — emit
+
+A Session's durable record was permanently removed. Distinct from `api-session/removed`, which reports only that the Session left the live Host registry and says nothing about the durable record: a Session that was never live emits this and nothing else.
+
+```ts cordis-catalog
+/**
+ * A Session's durable record was permanently removed. Distinct from
+ * `api-session/removed`, which reports only that the Session left the live
+ * Host registry and says nothing about the durable record: a Session that
+ * was never live emits this and nothing else.
+ * @mode emit
+ * @param sessionId - permanently deleted Session identity.
+ */
+'api-session/deleted'(sessionId: SessionId): void
+```
+
+Types: [SessionId](core.zh.md)
 
 Source: [`packages/api/session-controller/src/types.ts`](../../packages/api/session-controller/src/types.ts)
 

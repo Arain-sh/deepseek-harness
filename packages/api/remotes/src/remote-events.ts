@@ -18,6 +18,7 @@ export const API_REMOTE_FORWARDED_EVENTS = [
   { event: 'approval/request', mode: 'waterfall' },
   { event: 'api-session/activity', mode: 'emit' },
   { event: 'api-session/added', mode: 'emit' },
+  { event: 'api-session/deleted', mode: 'emit' },
   { event: 'api-session/error', mode: 'emit' },
   { event: 'api-session/removed', mode: 'emit' },
   { event: 'api-session/status', mode: 'emit' },

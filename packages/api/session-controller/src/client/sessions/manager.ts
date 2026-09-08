@@ -741,20 +741,44 @@ export class SessionManager {
     this.queues.delete(sessionId)
     this.jobsBySession.delete(sessionId)
     if (!durableSubagent) this.projectionStores.delete(sessionId)
-    const inflightCatalog = this.catalogInflight.get(sessionId)
-    if (inflightCatalog !== undefined) {
-      inflightCatalog.parentAvailableOverride = false
-      this.catalogStale.add(sessionId)
+    this.retireCatalogParent(sessionId)
+  }
+
+  /**
+   * Apply one permanent durable deletion forwarded through `ctx.remote.$on`.
+   *
+   * The durable record is gone, which is strictly more than {@link
+   * SessionManager.handleSessionRemoved} reports: there is no cold log left to
+   * reopen, so the row leaves the list unconditionally — a durable subagent
+   * does not degrade to an inactive child the way a live disposal does — and
+   * the retained address, projection store and resident instance leave with
+   * it. A deleted Session that was also live arrives here after its own
+   * `api-session/removed`; both orders converge because every step is a drop.
+   * @param sessionId - permanently deleted Session identity.
+   */
+  handleSessionDeleted(sessionId: SessionId): void {
+    // Dropped before the mutation: the retained address is what keeps a
+    // deleted child selectable (`current` masking) and therefore
+    // scope-eligible, so the service's prune only frees the scope once the
+    // address is gone.
+    this.addresses.delete(sessionId)
+    this.recordMutation({ kind: 'remove', sessionId })
+    this.updateCatalogActivity(sessionId, false)
+    const resident = this.sessions.get(sessionId)
+    if (resident !== undefined) {
+      // Flag the snapshot for whatever still holds the instance, then evict
+      // and tear it down along the manager's own fire-and-forget disposal
+      // path: `dispose()` still drains it, and a failed iterator teardown
+      // cannot surface as an unhandled rejection the way an unawaited
+      // `drop()` would. The service's later scope prune finds it already gone.
+      resident.handleRemoved()
+      this.sessions.delete(sessionId)
+      void this.startSessionDisposal(resident)
     }
-    const ownedCatalog = this.catalogs.get(sessionId)
-    if (ownedCatalog !== undefined && ownedCatalog.parentAvailable) {
-      this.catalogs.set(sessionId, { ...ownedCatalog, parentAvailable: false })
-    }
-    for (const [childId, address] of this.addresses) {
-      if (address.parentSessionId === sessionId) {
-        this.sessions.get(childId)?.handleSubagentParentAvailable(false)
-      }
-    }
+    this.queues.delete(sessionId)
+    this.jobsBySession.delete(sessionId)
+    this.projectionStores.delete(sessionId)
+    this.retireCatalogParent(sessionId)
   }
 
   /**
@@ -833,6 +857,29 @@ export class SessionManager {
       this.catalogs.set(parentSessionId, { ...catalog, entries })
     }
     if (changed) this.notifier.markDirty()
+  }
+
+  /**
+   * Retire one Session's standing as a subagent-catalog parent: an in-flight
+   * pull and a loaded catalog both lose parent availability, and every
+   * addressed child of that parent hears the same.
+   * @param sessionId - Session that stopped backing its catalog.
+   */
+  private retireCatalogParent(sessionId: SessionId): void {
+    const inflightCatalog = this.catalogInflight.get(sessionId)
+    if (inflightCatalog !== undefined) {
+      inflightCatalog.parentAvailableOverride = false
+      this.catalogStale.add(sessionId)
+    }
+    const ownedCatalog = this.catalogs.get(sessionId)
+    if (ownedCatalog !== undefined && ownedCatalog.parentAvailable) {
+      this.catalogs.set(sessionId, { ...ownedCatalog, parentAvailable: false })
+    }
+    for (const [childId, address] of this.addresses) {
+      if (address.parentSessionId === sessionId) {
+        this.sessions.get(childId)?.handleSubagentParentAvailable(false)
+      }
+    }
   }
 
   /** Preserve and project a positive expandability hint after one direct subagent publishes. */

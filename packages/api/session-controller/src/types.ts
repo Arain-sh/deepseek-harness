@@ -571,6 +571,15 @@ declare module '@deepseek-ai/cordis' {
      */
     'api-session/removed'(sessionId: SessionId): void
     /**
+     * A Session's durable record was permanently removed. Distinct from
+     * `api-session/removed`, which reports only that the Session left the live
+     * Host registry and says nothing about the durable record: a Session that
+     * was never live emits this and nothing else.
+     * @mode emit
+     * @param sessionId - permanently deleted Session identity.
+     */
+    'api-session/deleted'(sessionId: SessionId): void
+    /**
      * One Agent changed running state.
      * @mode emit
      * @param sessionId - Agent and Session identity.

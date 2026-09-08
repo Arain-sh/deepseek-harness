@@ -71,6 +71,7 @@ export class ReactLoopAgent implements Agent {
   readonly inbox: Inbox
   private phase: Phase
   private activityDone: Promise<void> = Promise.resolve()
+  private idleDisposalClaimed = false
 
   /** The agent-scoped registration boundary; the lifecycle owner unwinds it after the driver exits. */
   readonly scope: Scope
@@ -125,6 +126,9 @@ export class ReactLoopAgent implements Agent {
   }
 
   send(message: UserMessage, target: InboxTarget, wakeup: boolean): void {
+    if (this.idleDisposalClaimed) {
+      throw new Error(`agent "${this.id}" is reserved for permanent deletion`)
+    }
     // Waking input cannot join an aborted activity, so it starts the next turn.
     // Captured before the insertion so a reentrant cancel from a splice observer cannot reclassify it.
     const wakingAfterAbort = wakeup && this.phase.kind !== 'idle' && this.phase.abort.signal.aborted
@@ -154,6 +158,9 @@ export class ReactLoopAgent implements Agent {
   }
 
   runMaintenance<T>(job: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    if (this.idleDisposalClaimed) {
+      throw new Error(`agent "${this.id}" is reserved for permanent deletion`)
+    }
     if (this.phase.kind !== 'idle') throw new Error(`agent "${this.id}" already has active work`)
     const done = Promise.withResolvers<void>()
     const maintenance: Phase = {
@@ -211,6 +218,23 @@ export class ReactLoopAgent implements Agent {
     do {
       await (activity = this.activityDone)
     } while (activity !== this.activityDone)
+  }
+
+  /**
+   * Atomically claim the exact idle phase for lifecycle disposal. Public status
+   * alone cannot distinguish maintenance, and queued inbox input must also
+   * refuse the claim.
+   * @returns whether this Agent is now reserved against new work.
+   */
+  claimIdleDisposal(): boolean {
+    if (this.idleDisposalClaimed || this.phase.kind !== 'idle' || this.inbox.hasPending) return false
+    this.idleDisposalClaimed = true
+    return true
+  }
+
+  /** Release a deletion claim that was preflighted but not used. */
+  releaseIdleDisposal(): void {
+    this.idleDisposalClaimed = false
   }
 
   /** Report one failure at its live boundary, then preserve it for driver containment. */

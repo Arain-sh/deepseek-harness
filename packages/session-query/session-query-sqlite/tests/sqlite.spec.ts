@@ -1173,6 +1173,25 @@ describe('SQLite reconciliation and source lifecycle', () => {
     expect(after.has(added.id)).toBe(true)
   })
 
+  it('removes a committed deletion from an already-open derived index', async () => {
+    const deleted = header('event-deleted')
+    TestPersistence.reset([{ meta: deleted, events: messageEvents('event deletion needle') }])
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(TestPersistence)
+    await ctx.plugin(SqliteSessionQueryEngine, { path: ':memory:' })
+    await ctx.sessionQuery.searchSessions({ query: 'needle' })
+    const db = (ctx.sessionQuery as unknown as { _db: DatabaseSync })._db
+    expect(db.prepare('SELECT id FROM persisted_sessions WHERE id = ?').get(deleted.id)).toBeDefined()
+    TestPersistence.entries.delete(deleted.id)
+
+    await ctx.parallel('session-persistence/deleted', deleted.id)
+
+    expect(db.prepare('SELECT id FROM persisted_sessions WHERE id = ?').get(deleted.id)).toBeUndefined()
+    await ctx.fiber.dispose()
+  })
+
   it('drops connection-local live overlays on reopen and retains persistent bases', async () => {
     const path = await temporaryPath()
     const shared = header('shared', 10)
