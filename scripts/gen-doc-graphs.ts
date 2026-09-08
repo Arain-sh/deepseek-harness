@@ -246,6 +246,13 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'The JSONL backend persists the SessionEvent vocabulary as one artifact per Session.',
   },
   {
+    key: 'sessionDeletion',
+    pkg: 'session-deletion',
+    title: 'Host recursive Session deletion',
+    mode: 'core',
+    note: 'Reserves Session lineage, claims registry-owned idle Agents, and removes durable records bottom-up through the selected persistence backend.',
+  },
+  {
     key: 'settings',
     pkg: 'settings',
     title: 'User-settings seam',

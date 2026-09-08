@@ -5,7 +5,8 @@
  * same-storage reopen, and an optional physical tail corruptor), so every
  * backend is held to the same create/open/handle semantics: append-only
  * contiguous seqs, single-writer ownership, lazy materialization, fail-closed
- * vocabulary, freshness, and torn-tail repair. Backend-specific behavior
+ * vocabulary, freshness, torn-tail repair, and — for a backend that opts in
+ * with `supportsDeletion` — permanent deletion. Backend-specific behavior
  * (file layout, encodings, artifact export) stays in each backend's own spec.
  *
  * @module @deepseek-ai/dsh-session-persistence/tests/contract
@@ -45,6 +46,16 @@ export interface ContractBackend extends ContractBackendInstance {
    * simulating a crash mid-write. Enables the torn-tail tests.
    */
   corruptTail?: (id: SessionId, cwd: string | undefined) => Promise<void>
+  /**
+   * Materialize one session directly as a RELEASED historical-format record,
+   * as an older build would have left it — no handle, no current-format
+   * artifact. The first write open then migrates it and publishes the
+   * successor, which a backend that retains its migration source stores
+   * ALONGSIDE the original. Enables the multi-generation deletion test; a
+   * backend that keeps exactly one artifact per session omits it and that
+   * test self-skips.
+   */
+  seedReleasedGeneration?: (header: SessionHeader, events: readonly SessionEvent[]) => Promise<void>
 }
 
 /** Build a minimal {@link SessionHeader} for a session id. */
@@ -571,6 +582,155 @@ export function runPersistenceContract(name: string, make: () => Promise<Contrac
           await verify.close()
         } finally {
           await verifyInstance.dispose()
+        }
+      } finally {
+        await backend.dispose()
+      }
+    })
+
+    // --- permanent deletion (opt-in: every case self-skips without it) ---
+
+    it('advertises deletion support, and a backend without it refuses the operation', async () => {
+      const { persistence, dispose } = await make()
+      try {
+        if (persistence.supportsDeletion) return
+        // The capability probe and the operation must agree: a backend that
+        // does not override `delete` must not advertise support either.
+        await expect(persistence.delete(SessionId('unsupported'))).rejects.toThrow(/does not support permanent Session deletion/)
+      } finally {
+        await dispose()
+      }
+    })
+
+    it('permanently removes a materialized session, for this instance and for a fresh one', async () => {
+      const backend = await make()
+      try {
+        const { persistence } = backend
+        if (!persistence.supportsDeletion) return
+        const m = meta('delete-materialized', '/work')
+        const writer = await persistence.create(m)
+        await writer.append(oneTurnLog())
+        await writer.close()
+
+        expect(await persistence.delete(m.id)).toMatchObject(m)
+        expect(await persistence.stat(m.id)).toBeUndefined()
+        expect((await persistence.list()).map(s => s.header.id)).not.toContain(m.id)
+        await expect(persistence.open(m.id, 'read')).rejects.toBeInstanceOf(SessionPersistenceNotFoundError)
+        await expect(persistence.open(m.id, 'write')).rejects.toBeInstanceOf(SessionPersistenceNotFoundError)
+        // Repeating a deletion is absence, not a refusal.
+        expect(await persistence.delete(m.id)).toBeUndefined()
+
+        // The durable state must agree. A backend that removed only the
+        // artifact it happened to select would let a retained one resurrect
+        // the session for the next process that scans storage.
+        if (backend.reopen !== undefined) {
+          const reopened = await backend.reopen()
+          try {
+            expect(await reopened.persistence.stat(m.id)).toBeUndefined()
+            expect((await reopened.persistence.list()).map(s => s.header.id)).not.toContain(m.id)
+            await expect(reopened.persistence.open(m.id, 'read')).rejects.toBeInstanceOf(SessionPersistenceNotFoundError)
+          } finally {
+            await reopened.dispose()
+          }
+        }
+      } finally {
+        await backend.dispose()
+      }
+    })
+
+    it('deletion takes the same single-writer claim a write open takes, and releases it', async () => {
+      const { persistence, dispose } = await make()
+      try {
+        if (!persistence.supportsDeletion) return
+        const m = meta('delete-owned', '/work')
+        const creator = await persistence.create(m)
+        await creator.append(oneTurnLog())
+        // An active owner rejects rather than losing its bytes underneath it.
+        await expect(persistence.delete(m.id)).rejects.toBeInstanceOf(SessionAlreadyOwnedError)
+        // The refusal mutated nothing.
+        expect((await creator.read()).events).toEqual(oneTurnLog())
+        await creator.close()
+
+        expect(await persistence.delete(m.id)).toMatchObject(m)
+        // The claim is released again, so the id reads as absent rather than owned.
+        await expect(persistence.open(m.id, 'write')).rejects.toBeInstanceOf(SessionPersistenceNotFoundError)
+      } finally {
+        await dispose()
+      }
+    })
+
+    it('a created-but-unmaterialized session belongs to its creator, and deleting an unknown id is absence', async () => {
+      const { persistence, dispose } = await make()
+      try {
+        if (!persistence.supportsDeletion) return
+        expect(await persistence.delete(SessionId('never-stored'))).toBeUndefined()
+
+        const m = meta('delete-lazy', '/work')
+        const creator = await persistence.create(m)
+        await expect(persistence.delete(m.id)).rejects.toBeInstanceOf(SessionAlreadyOwnedError)
+        // Closing without an append erases the session: it never existed, so
+        // there is nothing durable for deletion to remove afterwards.
+        await creator.close()
+        expect(await persistence.delete(m.id)).toBeUndefined()
+        expect(await persistence.stat(m.id)).toBeUndefined()
+      } finally {
+        await dispose()
+      }
+    })
+
+    it('a deleted identity can be created again from scratch', async () => {
+      const backend = await make()
+      try {
+        const { persistence } = backend
+        if (!persistence.supportsDeletion) return
+        const m = meta('delete-then-recreate', '/work')
+        const first = await persistence.create(m)
+        await first.append(oneTurnLog())
+        await first.close()
+        expect(await persistence.delete(m.id)).toMatchObject(m)
+
+        // Whatever the removal left behind (a lock file, an emptied
+        // directory) must not make the identity look taken.
+        const second = await persistence.create(m)
+        await second.append(oneTurnLog())
+        await second.flush()
+        await second.close()
+        expect((await persistence.list()).map(s => s.header.id)).toContain(m.id)
+        const reader = await persistence.open(m.id, 'read')
+        expect((await reader.read()).events).toEqual(oneTurnLog())
+        await reader.close()
+      } finally {
+        await backend.dispose()
+      }
+    })
+
+    it('removes every retained generation of a migrated session, not only the current one', async () => {
+      const backend = await make()
+      try {
+        const { persistence } = backend
+        if (!persistence.supportsDeletion || backend.seedReleasedGeneration === undefined) return
+        const m = meta('delete-multi-generation', '/work')
+        await backend.seedReleasedGeneration(m, releasedV1OneTurnLog())
+        // A write open migrates the released record and publishes its
+        // successor; a backend that retains the source now holds two
+        // generations for this one session.
+        const writer = await persistence.open(m.id, 'write')
+        expect((await writer.read()).events).toEqual(oneTurnLog())
+        await writer.close()
+
+        expect(await persistence.delete(m.id)).toMatchObject({ id: m.id })
+        expect(await persistence.stat(m.id)).toBeUndefined()
+        if (backend.reopen !== undefined) {
+          const reopened = await backend.reopen()
+          try {
+            // A surviving source generation would be elected on the next
+            // scan and bring the session back with pre-migration content.
+            expect(await reopened.persistence.stat(m.id)).toBeUndefined()
+            expect((await reopened.persistence.list()).map(s => s.header.id)).not.toContain(m.id)
+            await expect(reopened.persistence.open(m.id, 'read')).rejects.toBeInstanceOf(SessionPersistenceNotFoundError)
+          } finally {
+            await reopened.dispose()
+          }
         }
       } finally {
         await backend.dispose()

@@ -112,6 +112,7 @@ export class WorkspaceRegistry extends Service {
 
   constructor(ctx: Context) {
     super(ctx, 'workspaceRegistry')
+    ctx.on('session-persistence/deleted', id => this.removeDeletedSession(id))
   }
 
   /** Open the domain, finish bootstrap when required, and rebuild the ordered cache. */
@@ -250,6 +251,22 @@ export class WorkspaceRegistry extends Service {
       }
       const state = this.requireState()
       await this.setState({ ...state, archivedSessionIds: [...state.archivedSessionIds, sessionId] })
+    })
+  }
+
+  /** Remove a committed persistence deletion from Workspace accounting and archive state. */
+  private removeDeletedSession(sessionId: SessionId): Promise<void> {
+    return this.enqueueOperation(async () => {
+      for (const entity of this.entities.values()) await entity.detachSession(sessionId)
+      this.headers.delete(sessionId)
+      this.sessionPaths.delete(sessionId)
+      this.invalidSessionPaths.delete(sessionId)
+      const state = this.requireState()
+      if (!state.archivedSessionIds.includes(sessionId)) return
+      await this.setState({
+        ...state,
+        archivedSessionIds: state.archivedSessionIds.filter(id => id !== sessionId),
+      })
     })
   }
 

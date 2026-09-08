@@ -883,6 +883,67 @@ export class SessionForkError extends Error {
 }
 
 /**
+ * Stable reason Session publication is fenced by an active deletion.
+ *
+ * `SESSION_DELETION_IN_PROGRESS` — the exact identity is reserved;
+ * `PARENT_SESSION_DELETION_IN_PROGRESS` — an ancestor is;
+ * `OVERLAPPING_SESSION_DELETION` — two reservations claim one identity;
+ * `STALE_SESSION_PREPARATION` — the Session object was built before the
+ * deletion it would republish across committed.
+ */
+export type SessionDeletionReservationErrorCode =
+  | 'SESSION_DELETION_IN_PROGRESS'
+  | 'PARENT_SESSION_DELETION_IN_PROGRESS'
+  | 'OVERLAPPING_SESSION_DELETION'
+  | 'STALE_SESSION_PREPARATION'
+
+/** Refusal raised while a Host deletion reservation owns an identity or lineage. */
+export class SessionDeletionReservationError extends Error {
+  /**
+   * @param message - deletion-fence context.
+   * @param code - machine-readable refusal reason.
+   */
+  constructor(
+    message: string,
+    public readonly code: SessionDeletionReservationErrorCode,
+  ) {
+    super(message)
+    this.name = 'SessionDeletionReservationError'
+  }
+}
+
+/**
+ * Host-only lifecycle reservation held by a recursive-deletion provider for
+ * the length of one deletion transaction. Deletion is not atomic against
+ * publication: between planning the subtree and removing its last durable
+ * record, a fork or a resume could publish a new child UNDER a dying parent,
+ * or republish a dying identity outright. The reservation fences both.
+ */
+export interface SessionDeletionReservation {
+  /**
+   * Add newly discovered descendants to the publication fence.
+   * @param sessionIds - identities to fence alongside the ones already held.
+   */
+  extend(sessionIds: readonly SessionId[]): void
+  /**
+   * Commit deletion epochs so a Session object prepared before this point
+   * cannot be entered afterwards.
+   * @param sessionIds - identities whose removal committed; omitted means the
+   *   whole reserved set.
+   */
+  complete(sessionIds?: readonly SessionId[]): void
+  /** Release the publication fence. Idempotent. */
+  release(): void
+}
+
+/** Mutable state behind one active recursive-deletion reservation. */
+interface SessionDeletionEntry {
+  readonly rootSessionId: SessionId
+  readonly sessionIds: Set<SessionId>
+  readonly completedSessionIds: Set<SessionId>
+}
+
+/**
  * In-memory session store (`ctx.sessions`).
  *
  * Persistence is intentionally not implemented here — the agent lifecycle
@@ -892,6 +953,12 @@ export class SessionForkError extends Error {
 export class SessionStore extends Service {
   private store = new Map<SessionId, SessionEntry>()
   private counter = 0
+  /** Active deletion reservations, keyed by their subtree root. */
+  private readonly deletions = new Map<SessionId, SessionDeletionEntry>()
+  /** Monotonic per-identity deletion counter; a bump invalidates preparations captured before it. */
+  private readonly deletionEpochs = new Map<SessionId, number>()
+  /** Deletion epochs an unpublished Session was built against, dropped with the Session. */
+  private readonly preparedEpochs = new WeakMap<Session, ReadonlyMap<SessionId, number>>()
 
   constructor(ctx: Context) {
     super(ctx, 'sessions')
@@ -968,18 +1035,25 @@ export class SessionStore extends Service {
       sessionId = brandString<SessionId>(id)
     }
     if (this.store.has(sessionId)) throw new Error(`session "${sessionId}" already exists`)
+    // Fence at construction as well as at publication: a Session built now
+    // and entered later must not be able to smuggle a reserved identity or a
+    // dying lineage past the deletion transaction.
+    this.assertPublicationAllowed(sessionId, options?.meta?.parentSession)
     if (options !== undefined) {
       const { eventState } = options
       switch (eventState) {
         case 'detached':
-        case 'shared-frozen':
-          return Session.fromRestore(
+        case 'shared-frozen': {
+          const restored = Session.fromRestore(
             sessionId,
             options.seed,
             options.meta,
             options.inheritedEventCount,
             eventState,
           )
+          this.rememberPreparation(restored)
+          return restored
+        }
         case undefined:
           break
         /* v8 ignore next -- closed-union exhaustiveness guard */
@@ -1000,7 +1074,9 @@ export class SessionStore extends Service {
       ...meta?.delegationDepth === undefined ? {} : { delegationDepth: meta.delegationDepth },
       ...meta?.agentPreset === undefined ? {} : { agentPreset: meta.agentPreset },
     }
-    return Session.create(sessionId, seed, header, options?.inheritedEventCount)
+    const session = Session.create(sessionId, seed, header, options?.inheritedEventCount)
+    this.rememberPreparation(session)
+    return session
   }
 
   /**
@@ -1028,6 +1104,12 @@ export class SessionStore extends Service {
   enter(session: Session): () => void {
     const id = session.id
     const carrier = scopeTarget(session, scopeOf(this.ctx))
+    // Deletion fences publication at the same boundary that fences
+    // collisions: a Session prepared before a deletion committed is stale
+    // even when nothing currently reserves its id, and a live reservation
+    // refuses the identity and its dying lineage outright.
+    this.assertPreparationCurrent(session)
+    this.assertPublicationAllowed(id, session.header.parentSession)
     // This is the authoritative collision boundary after arbitrary unpublished
     // preparation. Only one exact same-id transaction can publish.
     if (this.store.has(id)) throw new Error(`session "${id}" already exists`)
@@ -1177,6 +1259,163 @@ export class SessionStore extends Service {
    */
   list(): Session[] {
     return [...this.store.values()].map(entry => entry.session)
+  }
+
+  /**
+   * Whether an active Host deletion reservation currently owns one exact id.
+   * Activity entry points consult this before prompting or resuming an
+   * existing live Agent; Session publication performs the stronger lineage
+   * check instead.
+   * @param id - Session identity to inspect.
+   * @returns whether a deletion currently fences the id.
+   */
+  isDeletionReserved(id: SessionId): boolean {
+    for (const entry of this.deletions.values()) {
+      if (entry.sessionIds.has(id)) return true
+    }
+    return false
+  }
+
+  /**
+   * Reserve a root and its known subtree against Session publication for one
+   * deletion transaction. The provider may {@link
+   * SessionDeletionReservation.extend} the set while repeated persistence
+   * snapshots converge on the real lineage; overlapping reservations reject
+   * synchronously, so two deletions can never share an identity.
+   *
+   * The reservation is a fence, not a lock on storage: it stops NEW
+   * publication of the subtree, while the durable removal is excluded by
+   * persistence's own single-writer claim.
+   * @param rootSessionId - subtree root.
+   * @param initialSessionIds - the root and already-discovered descendants.
+   * @returns the single-shot reservation capability; always `release()` it.
+   * @throws {SessionDeletionReservationError} `OVERLAPPING_SESSION_DELETION`
+   *   when another active reservation already holds one of these identities.
+   */
+  reserveForDeletion(
+    rootSessionId: SessionId,
+    initialSessionIds: readonly SessionId[] = [rootSessionId],
+  ): SessionDeletionReservation {
+    const entry: SessionDeletionEntry = {
+      rootSessionId,
+      sessionIds: new Set([rootSessionId, ...initialSessionIds]),
+      completedSessionIds: new Set(),
+    }
+    this.assertNoDeletionOverlap(entry)
+    this.deletions.set(rootSessionId, entry)
+    let active = true
+    return {
+      extend: (sessionIds) => {
+        if (!active) throw new Error(`Session deletion reservation for "${rootSessionId}" is released`)
+        // Validate the WHOLE candidate set before mutating: a rejected
+        // extension must leave the live fence exactly as it was.
+        const candidate: SessionDeletionEntry = {
+          ...entry,
+          sessionIds: new Set([...entry.sessionIds, ...sessionIds]),
+        }
+        this.assertNoDeletionOverlap(candidate, entry)
+        for (const sessionId of sessionIds) entry.sessionIds.add(sessionId)
+      },
+      complete: (sessionIds = [...entry.sessionIds]) => {
+        if (!active) return
+        for (const sessionId of sessionIds) {
+          if (!entry.sessionIds.has(sessionId) || entry.completedSessionIds.has(sessionId)) continue
+          entry.completedSessionIds.add(sessionId)
+          // The epoch outlives the reservation: it is what keeps a Session
+          // prepared before this removal from entering the store afterwards,
+          // long after the fence is gone.
+          this.deletionEpochs.set(sessionId, (this.deletionEpochs.get(sessionId) ?? 0) + 1)
+        }
+      },
+      release: () => {
+        if (!active) return
+        active = false
+        // A stale capability cannot drop a later reservation of the same root.
+        if (this.deletions.get(rootSessionId) === entry) this.deletions.delete(rootSessionId)
+      },
+    }
+  }
+
+  /** Reject a reservation whose subtree intersects another active deletion. */
+  private assertNoDeletionOverlap(
+    candidate: SessionDeletionEntry,
+    self?: SessionDeletionEntry,
+  ): void {
+    for (const active of this.deletions.values()) {
+      if (active === self) continue
+      const overlap = [...candidate.sessionIds].find(sessionId => active.sessionIds.has(sessionId))
+      if (overlap === undefined) continue
+      throw new SessionDeletionReservationError(
+        `session "${overlap}" is already reserved by deletion of "${active.rootSessionId}"`,
+        'OVERLAPPING_SESSION_DELETION',
+      )
+    }
+  }
+
+  /**
+   * Reject a new identity, or a descendant of a dying one, while a deletion
+   * reservation is active. The ancestor walk follows the store's live
+   * `parentSession` chain and stops on a cycle, so a malformed lineage
+   * terminates instead of hanging publication.
+   */
+  private assertPublicationAllowed(id: SessionId, parentSession?: SessionId): void {
+    // Deletion is rare and publication is not: with no reservation live there
+    // is nothing to walk a lineage for.
+    if (this.deletions.size === 0) return
+    if (this.isDeletionReserved(id)) {
+      throw new SessionDeletionReservationError(
+        `session "${id}" is being permanently deleted`,
+        'SESSION_DELETION_IN_PROGRESS',
+      )
+    }
+    let ancestor = parentSession
+    const visited = new Set<SessionId>()
+    while (ancestor !== undefined && !visited.has(ancestor)) {
+      if (this.isDeletionReserved(ancestor)) {
+        throw new SessionDeletionReservationError(
+          `cannot publish session "${id}" below deleting parent "${ancestor}"`,
+          'PARENT_SESSION_DELETION_IN_PROGRESS',
+        )
+      }
+      visited.add(ancestor)
+      ancestor = this.store.get(ancestor)?.session.header.parentSession
+    }
+  }
+
+  /**
+   * Capture the deletion epochs an unpublished Session was built against —
+   * its own identity and its direct parent. Held weakly: an abandoned
+   * preparation costs nothing.
+   */
+  private rememberPreparation(session: Session): void {
+    const epochs = new Map<SessionId, number>()
+    epochs.set(session.id, this.deletionEpochs.get(session.id) ?? 0)
+    if (session.header.parentSession !== undefined) {
+      epochs.set(
+        session.header.parentSession,
+        this.deletionEpochs.get(session.header.parentSession) ?? 0,
+      )
+    }
+    this.preparedEpochs.set(session, epochs)
+  }
+
+  /**
+   * Refuse an unpublished Session captured before its identity or its parent
+   * was deleted. The reservation alone cannot cover this: it is released as
+   * soon as the transaction ends, while a Session object prepared underneath
+   * it can be entered at any later time and would republish a record that no
+   * longer exists.
+   */
+  private assertPreparationCurrent(session: Session): void {
+    const epochs = this.preparedEpochs.get(session)
+    if (epochs === undefined) return
+    for (const [sessionId, preparedEpoch] of epochs) {
+      if ((this.deletionEpochs.get(sessionId) ?? 0) === preparedEpoch) continue
+      throw new SessionDeletionReservationError(
+        `session "${session.id}" was prepared before session "${sessionId}" was deleted`,
+        'STALE_SESSION_PREPARATION',
+      )
+    }
   }
 
   /**

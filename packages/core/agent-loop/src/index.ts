@@ -674,7 +674,26 @@ export class AgentLoop extends Service implements AgentFactory {
           // session-start extension point), so only the liveness recheck is owed.
           emitAgentEvent(loopCtx, agent, 'agent/session-start', { source })
           assertLive()
-          return { agent, dispose }
+          return {
+            agent,
+            dispose,
+            reserveIdleDisposal: () => {
+              if (!agent.claimIdleDisposal()) return undefined
+              let active = true
+              return {
+                dispose: async () => {
+                  if (!active) throw new Error(`agent "${id}" idle-disposal reservation is released`)
+                  active = false
+                  await dispose()
+                },
+                release: () => {
+                  if (!active) return
+                  active = false
+                  agent.releaseIdleDisposal()
+                },
+              }
+            },
+          }
         },
         dispose,
       }

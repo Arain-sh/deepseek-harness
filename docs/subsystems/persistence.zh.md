@@ -336,6 +336,36 @@ interface SessionPersistenceSnapshot {
 
 Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — the language sides differ only in locale-specific paired document paths. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.zh.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
 
+<a id="ctxsessiondeletion--sessiondeletion"></a>
+
+### `ctx.sessionDeletion` — `SessionDeletion`
+
+Host-only permanent Session deletion provider. Product code validates placement and archive authority before invoking this service.
+
+```ts cordis-catalog
+/**
+ * Resolve the current recursive deletion plan without reserving or mutating
+ * any Session.
+ * @param rootSessionId - subtree root to inspect.
+ * @returns immutable ids in bottom-up deletion order.
+ */
+async preview(rootSessionId: SessionId): Promise<SessionDeletionPreview>
+
+/**
+ * Permanently remove one Session subtree. All live members are claimed idle
+ * before any Agent is disposed; durable records then delete bottom-up.
+ * Retrying after partial storage success converges because missing children
+ * are skipped and the root remains last.
+ * @param rootSessionId - subtree root to delete.
+ * @returns immutable plan and ids removed by this attempt.
+ */
+async deleteTree(rootSessionId: SessionId): Promise<SessionDeletionResult>
+```
+
+Types: [SessionId](core.zh.md)
+
+Source: [`packages/session/session-deletion/src/index.ts`](../../packages/session/session-deletion/src/index.ts)
+
 <a id="ctxsessionpersistence--sessionpersistence-abstract-seam"></a>
 
 ### `ctx.sessionPersistence` — `SessionPersistence` (abstract seam)
@@ -374,6 +404,35 @@ abstract create(header: SessionHeader, options?: SessionPersistenceCreateOptions
 abstract open(id: SessionId, access: SessionAccess, options?: SessionPersistenceOpenOptions): Promise<SessionHandle>
 
 /**
+ * Permanently remove one stored session and everything the backend holds
+ * for it. Whole-session removal is id-addressed like `create`/`stat`/`list`
+ * — it has no slice semantics and no handle could survive it — and it
+ * answers absence the way `stat` does, with `undefined` rather than a
+ * refusal.
+ *
+ * Implementations take the same single-writer claim `open(id, 'write')`
+ * takes, so an active owner rejects instead of losing its bytes underneath
+ * it; the removal is durable when the returned promise resolves, and
+ * repeating it on an already-removed id is a no-op. On success the backend
+ * publishes `session-persistence/deleted` post-commit (see
+ * {@link emitDeleted}).
+ *
+ * The default rejects: deletion is opt-in, so a third-party backend keeps
+ * compiling and keeps `supportsDeletion` false.
+ * @param _id - the stored session to remove.
+ * @param _options - optional cancellation.
+ * @returns the removed session's stored header, or `undefined` when the
+ *   session did not exist — or when it did, but its stored header was
+ *   unreadable (an unsupported format generation, say): an artifact this
+ *   build cannot interpret must still be removable, so a refusal costs the
+ *   caller the header, never the removal. `stat` conflates the two the same
+ *   way; `session-persistence/deleted` is the authoritative signal that
+ *   something was removed.
+ * @throws {SessionAlreadyOwnedError} while a write handle owns the id.
+ */
+delete(_id: SessionId, _options?: SessionPersistenceDeleteOptions): Promise<SessionHeader | undefined>
+
+/**
  * Flush every active write handle owned by this service instance in one
  * durability barrier: each handle's routed live events drain durably and
  * its session materializes, exactly as that handle's own
@@ -408,6 +467,35 @@ abstract stat(id: SessionId, options?: SessionPersistenceStatOptions): Promise<S
  * @returns one snapshot per stored session.
  */
 abstract list(options?: SessionPersistenceListOptions): Promise<readonly SessionPersistenceSnapshot[]>
+```
+
+Types: [SessionId](core.zh.md)
+
+Source: [`packages/session/session-persistence/src/index.ts`](../../packages/session/session-persistence/src/index.ts)
+
+<a id="session-persistence-events"></a>
+
+### `session-persistence/*` events
+
+<a id="session-persistencedeleted--parallel"></a>
+
+#### `session-persistence/deleted` — parallel
+
+Post-commit notification that one stored session was permanently removed. Derived read models (search indexes, projection caches, workspace accounting) drop their row from this event; a listener failure is contained and cannot reverse the storage commit, so a listener must be idempotent and must not assume the record is still readable. Only the identity travels: by the time this fires the log is gone, so a header would name bytes no reader can reach.
+
+```ts cordis-catalog
+/**
+ * Post-commit notification that one stored session was permanently
+ * removed. Derived read models (search indexes, projection caches,
+ * workspace accounting) drop their row from this event; a listener
+ * failure is contained and cannot reverse the storage commit, so a
+ * listener must be idempotent and must not assume the record is still
+ * readable. Only the identity travels: by the time this fires the log is
+ * gone, so a header would name bytes no reader can reach.
+ * @param sessionId - the permanently deleted session identity.
+ * @mode parallel
+ */
+'session-persistence/deleted'(sessionId: SessionId): Promise<void> | void
 ```
 
 Types: [SessionId](core.zh.md)

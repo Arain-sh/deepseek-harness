@@ -172,11 +172,13 @@ hydratePrepared( session: Session, events: readonly SessionEvent[], ): Projectio
  * this; tests and carriers may too). The registry cut is snapshotted at
  * this boundary (states are live references), then the session's record is
  * replaced on the domain's write chain. NOT fail-soft — callers on the
- * fail-soft paths contain it.
+ * fail-soft paths contain it. A session whose durable record is being
+ * permanently deleted checkpoints to nothing: the row would outlive the log
+ * it was folded from.
  * @param session - the live session to checkpoint.
  * @returns resolution after durability and event emission.
  */
-async write(session: Session): Promise<void>
+write(session: Session): Promise<void>
 
 /**
  * Cold-read one session's projections from its complete log. Each unit is

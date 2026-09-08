@@ -13,7 +13,7 @@ import {
   sessionFormatCatalog,
 } from '@deepseek-ai/dsh-session-format-catalog'
 import { readdirSync, type Dirent } from 'node:fs'
-import { open, mkdir, readdir, realpath, link, rm, stat, truncate } from 'node:fs/promises'
+import { open, mkdir, readdir, realpath, link, rm, rmdir, stat, truncate, unlink } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { scheduler } from 'node:timers/promises'
@@ -26,12 +26,13 @@ import {
   type SessionAccess, type SessionHandle,
   type SessionHandleReadResult,
   type SessionLocation, type SessionPersistenceCreateOptions,
+  type SessionPersistenceDeleteOptions,
   type SessionPersistenceListOptions, type SessionPersistenceOpenOptions,
   type SessionPersistenceSnapshot, type SessionPersistenceStatOptions,
   type SessionPersistenceRevision as PersistenceRevision,
 } from '@deepseek-ai/dsh-session-persistence'
 import { JsonlBackendTracker, JsonlSessionHandle, type StorageHandleState } from './storage.ts'
-import { SessionWriteLease } from './lease.ts'
+import { LEASE_FILENAME, SessionWriteLease } from './lease.ts'
 import { SESSION_FORMAT_VERSION, SessionId as makeSessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionId, SessionHeader, SessionLogOffset as SessionLogOffsetType } from '@deepseek-ai/dsh-session'
 import {
@@ -241,6 +242,9 @@ class JsonlSessionPersistence extends SessionPersistence {
   /** Backend label for diagnostics and effects; shadows `Service.name` without changing the service key. */
   override readonly name = 'session-persistence-jsonl'
 
+  /** This backend erases bytes: {@link JsonlSessionPersistence.delete} is implemented. */
+  override readonly supportsDeletion = true
+
   private root: string
   private compression: JsonlCompression
   private rootEncodingCheck: Promise<void> | undefined
@@ -407,6 +411,94 @@ class JsonlSessionPersistence extends SessionPersistence {
   }
 
   /**
+   * Permanently remove one stored session: every retained generation
+   * artifact, the session's kernel lock file, and its now-empty directory.
+   *
+   * The in-process write claim is taken first, so this is the same exclusion
+   * `open(id, 'write')` uses — an unclosed owner rejects instead of losing
+   * its artifact underneath it, and a concurrent `create` of the id is
+   * blocked for the whole operation.
+   * @param id - the stored session to remove.
+   * @param options - optional cancellation, observed until the sweep commits.
+   * @returns the removed session's stored header, `undefined` when nothing
+   *   was stored or the stored header was unreadable.
+   * @throws {SessionAlreadyOwnedError} while a handle holds the id's write claim.
+   */
+  override async delete(
+    id: SessionId,
+    options?: SessionPersistenceDeleteOptions,
+  ): Promise<SessionHeader | undefined> {
+    const signal = options?.signal
+    signal?.throwIfAborted()
+    await this.ensureRootEncoding()
+    signal?.throwIfAborted()
+    // A successful claim also proves there is no created-but-unmaterialized
+    // entry to erase: a pending session exists only alongside its creator's
+    // claim on the same id, and closing that creator without materializing
+    // erases the session anyway. So everything left to remove is on disk.
+    this.tracker.claimWrite(id)
+    let lease: SessionWriteLease | undefined
+    try {
+      const selected = await this.findLog(id, signal)
+      if (selected === undefined) {
+        // Nothing durable, but this instance may still hold derived state for
+        // the id (a memoized cold log, a joinable migration) that must not
+        // outlive the caller's belief that the session is gone.
+        this.coldLogMemo.delete(id)
+        await this.cancelMigrationPreparation(id)
+        return undefined
+      }
+      const dir = dirname(selected.sourcePath)
+      lease = await this.acquireLease(id, undefined, dir)
+      const header = await this.readDeletableHeader(selected, id, signal)
+      signal?.throwIfAborted()
+      // Committed from here: cancelling mid-sweep would leave a half-removed
+      // directory, so the signal is not consulted again.
+      this.coldLogMemo.delete(id)
+      await this.cancelMigrationPreparation(id)
+      await this.removeGenerationArtifacts(dir)
+      /* v8 ignore next -- Windows publishes namespace changes write-through. */
+      if (process.platform !== 'win32') await this.syncDirPosix(dir)
+      // Release the lock BEFORE the directory goes: `session.lock` is a live
+      // descriptor inside it and the directory cannot be removed around a
+      // lock this process still holds.
+      await lease.release()
+      lease = undefined
+      // Second sweep, after the cancelled preparation reached its terminal
+      // state: `publish()` is memoized on the prepared object and is not
+      // gated by the abort signal, so a publication already in flight when
+      // the abort landed can still link a successor generation in. Unlinking
+      // is idempotent, so a quiet directory costs one readdir.
+      const late = await this.removeGenerationArtifacts(dir)
+      /* v8 ignore next -- Windows publishes namespace changes write-through. */
+      if (late > 0 && process.platform !== 'win32') await this.syncDirPosix(dir)
+      const removedDirectory = await this.removeSessionDirectory(dir)
+      /* v8 ignore next -- Windows publishes namespace changes write-through. */
+      if (removedDirectory && process.platform !== 'win32') await this.syncDirPosix(dirname(dir))
+      await this.emitDeleted(id)
+      return header
+    } catch (error) {
+      // Keep the original diagnostic no matter how the lock release fares: a
+      // release failure joins it instead of replacing it.
+      /* v8 ignore next -- typed backends and fs reject with Error */
+      const failure = error instanceof Error ? error : new Error(String(error))
+      let releaseFailure: Error | undefined
+      try {
+        await lease?.release()
+      } catch (raw: unknown) {
+        /* v8 ignore next -- lock releases reject with Error */
+        releaseFailure = raw instanceof Error ? raw : new Error(String(raw))
+      }
+      if (releaseFailure !== undefined) {
+        throw new AggregateError([failure, releaseFailure], `session "${id}": delete failed and its lock release failed`)
+      }
+      throw failure
+    } finally {
+      this.tracker.releaseClaim(id)
+    }
+  }
+
+  /**
    * Flush every active write handle in one durability barrier; see the seam
    * contract.
    * @returns resolution once every write handle active at the call has flushed.
@@ -487,6 +579,134 @@ class JsonlSessionPersistence extends SessionPersistence {
     }
     signal?.throwIfAborted()
     return snapshots
+  }
+
+  // --- deletion internals ---
+
+  /**
+   * Read the header a delete reports back, degrading to `undefined` when this
+   * build cannot interpret the artifact.
+   *
+   * A session whose only generation is an unsupported version, or whose
+   * header is corrupt, refuses every read — but it must still be deletable,
+   * or those bytes are unreachable forever. Identity comes from the
+   * directory the artifact was resolved through, so a refusal costs the
+   * caller the header, never the removal. Every other failure (a mismatched
+   * stored id above all) still refuses: it means this directory is not this
+   * session's.
+   * @param selected - the resolved authoritative generation.
+   * @param id - the session being deleted.
+   * @param signal - optional cancellation for the header read.
+   * @returns the stored header, or `undefined` when it cannot be read.
+   */
+  private async readDeletableHeader(
+    selected: ResolvedJsonlGeneration,
+    id: SessionId,
+    signal?: AbortSignal,
+  ): Promise<SessionHeader | undefined> {
+    try {
+      return await this.readGenerationHeader(selected, id, signal)
+    } catch (error: unknown) {
+      signal?.throwIfAborted()
+      if (error instanceof SessionFormatUnsupportedError
+        || error instanceof SessionPersistenceCorruptionError) {
+        this.ctx.logger.warn(`${this.name}: session "${id}" is being deleted without a readable header: ${String(error)}`)
+        return undefined
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Cancel one id's in-flight released-format migration and wait for it to
+   * reach a terminal state.
+   *
+   * Deliberately conservative: the entry leaves the map first so no new
+   * waiter can join it, the decode is aborted, and the abort is awaited
+   * before any artifact is unlinked. `publish()` is memoized on the prepared
+   * object and does not consult the preparation's abort signal, so an abort
+   * alone cannot promise that no successor generation lands — the caller's
+   * second sweep is what removes one that does. The cost is latency on a
+   * rare, explicitly confirmed operation; the optimistic alternative's
+   * failure mode is a permanently deleted Session silently reappearing.
+   * @param id - the session whose preparation is discarded.
+   */
+  private async cancelMigrationPreparation(id: SessionId): Promise<void> {
+    const preparation = this.migrationPreparations.get(id)
+    if (preparation === undefined) return
+    this.migrationPreparations.delete(id)
+    preparation.controller.abort()
+    // A rejection is the abort's expected outcome, not this operation's failure.
+    await preparation.promise.catch(() => undefined)
+  }
+
+  /**
+   * Unlink every canonical generation artifact in one session directory.
+   *
+   * A released-format migration links its successor in BESIDE the retained
+   * source, so one directory legitimately holds several generations at once.
+   * Removing only the selected one would leave a lower generation for
+   * `resolveGenerationInDirectory` to elect on the next scan, and the deleted
+   * session would reappear carrying older content. Idempotent: an entry that
+   * vanished concurrently is already in the wanted state.
+   * @param dir - the session's artifact directory.
+   * @returns how many artifacts this sweep removed.
+   */
+  private async removeGenerationArtifacts(dir: string): Promise<number> {
+    let entries: Dirent[]
+    try {
+      entries = await readdir(dir, { withFileTypes: true })
+    } catch (error: unknown) {
+      if (isENOENT(error)) return 0
+      throw error
+    }
+    let removed = 0
+    for (const entry of entries) {
+      if (parseGenerationLogFilename(entry.name, this.compression) === undefined) continue
+      try {
+        await unlink(join(dir, entry.name))
+        removed += 1
+      } catch (error: unknown) {
+        if (!isENOENT(error)) throw error
+      }
+    }
+    return removed
+  }
+
+  /**
+   * Remove the emptied session directory, taking its kernel lock file with it.
+   *
+   * `session.lock` lives INSIDE the session directory, so on POSIX every
+   * session that was ever write-opened leaves one behind and a bare `rmdir`
+   * would always fail with `ENOTEMPTY` — orphaning the directory forever.
+   * The caller released the lease first, so unlinking the file forfeits
+   * nothing: it is the exclusion for a session that no longer exists.
+   * Windows holds a named semaphore and writes no lock file at all, so the
+   * unlink is a no-op there.
+   *
+   * Best-effort and never fatal: the artifacts are already durably gone by
+   * the time this runs, so a directory this backend cannot empty (a migration
+   * temporary, a foreign file, a permission refusal) is a leftover to warn
+   * about, not a reason to fail a committed deletion.
+   * @param dir - the emptied session directory.
+   * @returns whether the directory was removed.
+   */
+  private async removeSessionDirectory(dir: string): Promise<boolean> {
+    try {
+      try {
+        await unlink(join(dir, LEASE_FILENAME))
+      } catch (error: unknown) {
+        if (!isENOENT(error)) throw error
+      }
+      await rmdir(dir)
+      return true
+    } catch (error: unknown) {
+      const code = (error as NodeJS.ErrnoException | null)?.code
+      if (code !== 'ENOTEMPTY' && code !== 'EEXIST' && code !== 'ENOENT') {
+        this.ctx.logger.warn(`${this.name}: deleted session directory "${dir}" could not be removed: ${String(error)}`)
+      }
+      return false
+    }
   }
 
   // --- handle-facing storage internals (package-private via the handle class below) ---

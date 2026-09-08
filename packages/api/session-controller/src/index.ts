@@ -149,6 +149,11 @@ export class SessionController extends TypertRemoteService {
     ctx.on('session/disposed', (session) => {
       ctx.emit('api-session/removed', session.id)
     })
+    // Durable deletion is a second, independent fact: `session/disposed` covers
+    // only the live registry, so a cold Session that was never published emits
+    // nothing there. Relaying the persistence event under its own name lets a
+    // consumer drop the row instead of merely flagging it.
+    ctx.on('session-persistence/deleted', (id) => { ctx.emit('api-session/deleted', id) })
     ctx.on('agent/status', ({ agent, status }) => {
       ctx.emit('api-session/status', agent.id, status === 'running')
     })

@@ -160,7 +160,28 @@ export interface ResumeAgentOptions {
 export interface AgentHandle {
   agent: Agent
   dispose(): Promise<void>
+  /**
+   * Atomically reserve a truly idle Agent for permanent deletion. Implementors
+   * omit this capability when they cannot distinguish maintenance or queued
+   * input from public `idle` status.
+   * @returns a reservation, or `undefined` when work is active or queued.
+   */
+  reserveIdleDisposal?(): AgentIdleDisposalReservation | undefined
 }
+
+/** Exact idle claim that either follows normal disposal or is released unused. */
+export interface AgentIdleDisposalReservation {
+  /** Dispose the claimed Agent through its ordinary lifecycle owner. */
+  dispose(): Promise<void>
+  /** Release an unused claim without disposing the Agent. */
+  release(): void
+}
+
+/** Result of asking the registry to reserve one owned live Agent for disposal. */
+export type AgentIdleDisposalAttempt =
+  | { readonly kind: 'claimed'; readonly reservation: AgentIdleDisposalReservation }
+  | { readonly kind: 'busy' }
+  | { readonly kind: 'unowned' }
 
 /**
  * The agent-creation factory the loop implementation provides to the registry
@@ -244,6 +265,7 @@ interface FactorySlot {
  */
 export class AgentRegistry extends Service {
   private store = new Map<SessionId, AgentEntry>()
+  private readonly handles = new Map<SessionId, AgentHandle>()
   private factory: FactorySlot | undefined
   private readonly initiators = new AsyncLocalStorage<Agent | undefined>()
   private readonly initiatorRuns = new AsyncLocalStorage<InitiatorRun>()
@@ -277,6 +299,10 @@ export class AgentRegistry extends Service {
       yield () => this.disposeInitiators()
       yield () => { this.closeInitiators() }
     }.bind(this), 'agents.initiatorLifecycle()')
+    ctx.on('agent/disposed', ({ agent }) => {
+      if (this.handles.get(agent.id)?.agent === agent) this.handles.delete(agent.id)
+    })
+    ctx.effect(() => () => { this.handles.clear() }, 'agents.ownedHandles()')
   }
 
   /**
@@ -394,7 +420,7 @@ export class AgentRegistry extends Service {
     const { target } = this.requireFactory()
     const receiver = getTraceable(ownerCtx, target)
     // oxlint-disable-next-line typescript/unbound-method -- Reflect.apply intentionally supplies the caller-traced receiver
-    return Reflect.apply(target.createAgent, receiver, [ownerCtx, options])
+    return this.rememberHandle(await Reflect.apply(target.createAgent, receiver, [ownerCtx, options]))
   }
 
   /**
@@ -409,7 +435,31 @@ export class AgentRegistry extends Service {
     const { target } = this.requireFactory()
     const receiver = getTraceable(ownerCtx, target)
     // oxlint-disable-next-line typescript/unbound-method -- Reflect.apply intentionally supplies the caller-traced receiver
-    return Reflect.apply(target.resume, receiver, [ownerCtx, options])
+    return this.rememberHandle(await Reflect.apply(target.resume, receiver, [ownerCtx, options]))
+  }
+
+  /** Retain one exact factory handle while its Agent remains the live registry entry. */
+  private rememberHandle(handle: AgentHandle): AgentHandle {
+    if (this.get(handle.agent.id) === handle.agent) this.handles.set(handle.agent.id, handle)
+    return handle
+  }
+
+  /**
+   * Atomically reserve a registry-owned Agent for idle disposal without
+   * exposing its teardown handle. Agents registered directly or created by a
+   * configuration helper have no retained handle and return `unowned`.
+   * @param sessionId - live Agent identity to claim.
+   * @returns claimed reservation, busy state, or missing ownership.
+   */
+  reserveIdleDisposal(sessionId: SessionId): AgentIdleDisposalAttempt {
+    const agent = this.get(sessionId)
+    const handle = this.handles.get(sessionId)
+    if (agent === undefined || handle === undefined || handle.agent !== agent
+      || handle.reserveIdleDisposal === undefined) {
+      return { kind: 'unowned' }
+    }
+    const reservation = handle.reserveIdleDisposal()
+    return reservation === undefined ? { kind: 'busy' } : { kind: 'claimed', reservation }
   }
 
   /**

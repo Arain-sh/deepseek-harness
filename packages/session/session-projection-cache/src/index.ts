@@ -32,6 +32,9 @@ import type {
   SessionProjectionMap,
 } from '@deepseek-ai/dsh-session-projection'
 import type { KvTable } from '@deepseek-ai/dsh-storage-domain'
+// Type-only: pulls in the persistence Service Definition's cordis `Events`
+// declaration so `session-persistence/deleted` is a known event key here.
+import type {} from '@deepseek-ai/dsh-session-persistence'
 import { projectionCacheDomainSpec } from './spec.ts'
 import type { CheckpointIdentity, CheckpointRecord } from './spec.ts'
 
@@ -96,6 +99,10 @@ export class SessionProjectionCache extends Service {
 
   private table?: KvTable<SessionId, CheckpointRecord>
   private readonly dirty = new Map<Session, DirtyState>()
+  /** In-flight cache operations per session, so a deletion can wait for the ones it must outlive. */
+  private readonly operations = new Map<SessionId, Set<Promise<unknown>>>()
+  /** Sessions whose durable log is being permanently removed; their rows must not be re-created. */
+  private readonly deleting = new Set<SessionId>()
 
   constructor(ctx: Context, public config: Config) {
     super(ctx, 'sessionProjectionCache')
@@ -104,8 +111,14 @@ export class SessionProjectionCache extends Service {
   /** Open the domain and install the write-behind listeners. */
   protected async [Service.init](): Promise<void> {
     const domain = await this.ctx.storageDomain.open(projectionCacheDomainSpec)
-    this.ctx.effect(() => () => domain.close(), 'sessionProjectionCache.domainClose')
+    // Drain before close so an in-flight write-behind cannot reject `closed`
+    // into a warning that hides a row this cache still owed the medium.
+    this.ctx.effect(() => async () => {
+      await this.drainOperations()
+      await domain.close()
+    }, 'sessionProjectionCache.domainClose')
     this.table = domain.table('sessions')
+    this.ctx.on('session-persistence/deleted', id => this.removeDeletedRecord(id))
     this.installWritePath()
   }
 
@@ -239,13 +252,31 @@ export class SessionProjectionCache extends Service {
    * this; tests and carriers may too). The registry cut is snapshotted at
    * this boundary (states are live references), then the session's record is
    * replaced on the domain's write chain. NOT fail-soft — callers on the
-   * fail-soft paths contain it.
+   * fail-soft paths contain it. A session whose durable record is being
+   * permanently deleted checkpoints to nothing: the row would outlive the log
+   * it was folded from.
    * @param session - the live session to checkpoint.
    * @returns resolution after durability and event emission.
    */
-  async write(session: Session): Promise<void> {
+  write(session: Session): Promise<void> {
+    // A checkpoint that started before the deletion committed would otherwise
+    // re-create the row after the durable log is gone, and the next cold read
+    // would fold a phantom projection from it.
+    if (this.deleting.has(session.id)) {
+      this.markClean(session)
+      return Promise.resolve()
+    }
+    // The cut and the throttle reset stay SYNCHRONOUS, as they were before this
+    // method gained an operation tracker: callers rely on both having happened
+    // by the time `write` returns, and deferring them by even one microtask
+    // lets the session advance past the cut this checkpoint claims to be.
     const rows = this.ctx.sessionProjections.checkpoint(session)
     this.markClean(session)
+    return this.track(session.id, () => this.writeCore(session, rows))
+  }
+
+  /** The durable tail of one checkpoint, inside the tracker a deletion drains. */
+  private async writeCore(session: Session, rows: ProjectionCheckpoint): Promise<void> {
     // Durability barrier: the checkpoint cut was taken above, so flushing
     // AFTER it guarantees every event inside the cut is durably logged
     // before the cache row lands — a crash can leave the cache behind the
@@ -254,6 +285,8 @@ export class SessionProjectionCache extends Service {
     // already gone; persistence's own retirement drain covers that path and
     // any residual overreach is caught by the cold read's anchored floor.
     if (this.ctx.sessions.get(session.id) === session) await this.ctx.sessions.flush(session)
+    // Re-check across the flush await: deletion can commit inside it.
+    if (this.deleting.has(session.id)) return
     await this.put(
       session.id,
       identityOf(session.header, session.inheritedEventCount),
@@ -279,6 +312,10 @@ export class SessionProjectionCache extends Service {
     inheritedEventCount: SessionLogOffset,
     events: readonly SessionEvent[],
   ): ProjectionSnapshot {
+    // Synchronous refusal: this read folds a log the caller supplied, and
+    // serving a projection for a session whose durable record is being erased
+    // would hand back state nothing can reproduce.
+    if (this.deleting.has(meta.id)) throw new Error(`session "${meta.id}" is being permanently deleted`)
     const identity = identityOf(meta, inheritedEventCount)
     const restored = this.ctx.sessionProjections.restore(
       this.recordFor(meta.id, identity)?.rows ?? {},
@@ -289,7 +326,9 @@ export class SessionProjectionCache extends Service {
     )
     // Refresh the row so the next cold read seeds from it; fail-soft and
     // fire-and-forget — a failed write-back only costs a longer tail replay.
-    void this.put(meta.id, identity, restored.checkpoint).catch((error: unknown) => {
+    // Tracked even though nothing awaits it: this is the one write that can
+    // land AFTER a deletion commits, so a deletion must be able to drain it.
+    void this.track(meta.id, () => this.put(meta.id, identity, restored.checkpoint)).catch((error: unknown) => {
       this.ctx.logger.warn(`session projection cache: cold-read write-back for "${meta.id}" failed (cache stays stale): ${String(error)}`)
     })
     return restored.snapshot
@@ -377,11 +416,80 @@ export class SessionProjectionCache extends Service {
 
   /** Replace one session's stored record with its log identity and a detached snapshot of `rows`. */
   private async put(id: SessionId, identity: CheckpointIdentity, rows: ProjectionCheckpoint): Promise<void> {
+    // The last gate before the medium: every route into `put` is checked here
+    // so no path can resurrect a row whose log is gone.
+    if (this.deleting.has(id)) return
     const detached = snapshotJsonValue(rows)
     if (detached === undefined) {
       throw new TypeError('projection checkpoint is not losslessly JSON-serializable (a unit state violates the plain-JSON contract)')
     }
     await this.requireTable().put(id, { identity, rows: detached as CheckpointRecord['rows'] })
+  }
+
+  /**
+   * Drop one permanently deleted session's cache row once every earlier
+   * same-session operation has settled.
+   *
+   * The tombstone is held across the whole removal so a write-behind
+   * checkpoint or a cold-read write-back that started before the deletion
+   * committed cannot land after it — that is the failure this listener
+   * exists to prevent, since the row would then outlive the log it was
+   * folded from and seed a phantom projection.
+   *
+   * The tombstone is keyed by id alone — the event carries only the id — and
+   * that is enough: the row's log is gone whichever lifecycle wrote it, and a
+   * same-id republication cannot interleave here because the deletion
+   * transaction fences publication of a reserved id for its whole duration.
+   * Over-eager removal costs a longer tail replay; the cache is a fold
+   * shortcut, never an authority.
+   * @param id - the permanently deleted session identity.
+   */
+  private async removeDeletedRecord(id: SessionId): Promise<void> {
+    const owned = !this.deleting.has(id)
+    this.deleting.add(id)
+    try {
+      await this.drainOperations(id)
+      // `delete` is a no-op for an absent key, so no read guard is needed.
+      await this.requireTable().delete(id)
+      // Drain again: the first drain can have admitted an operation that was
+      // already past its tombstone check when the tombstone went up.
+      await this.drainOperations(id)
+    } finally {
+      if (owned) this.deleting.delete(id)
+    }
+  }
+
+  /** Track one operation so a committed deletion can wait for every earlier write or write-back. */
+  private track<T>(id: SessionId, operation: () => Promise<T>): Promise<T> {
+    const pending = Promise.resolve().then(operation)
+    const operations = this.operations.get(id) ?? new Set<Promise<unknown>>()
+    this.operations.set(id, operations)
+    operations.add(pending)
+    const finish = (): void => { this.finishOperation(id, operations, pending) }
+    void pending.then(finish, finish)
+    return pending
+  }
+
+  /** Remove one settled operation without disturbing a later same-id set. */
+  private finishOperation(id: SessionId, operations: Set<Promise<unknown>>, pending: Promise<unknown>): void {
+    operations.delete(pending)
+    if (operations.size === 0 && this.operations.get(id) === operations) this.operations.delete(id)
+  }
+
+  /**
+   * Await tracked operations until none remain in the requested scope.
+   * @param id - one session to drain; omitted drains every session.
+   */
+  private async drainOperations(id?: SessionId): Promise<void> {
+    for (;;) {
+      const pending = id === undefined
+        ? [...this.operations.values()].flatMap(operations => [...operations])
+        : [...this.operations.get(id) ?? []]
+      if (pending.length === 0) return
+      // Settled, not resolved: a failing checkpoint is fail-soft everywhere
+      // else and must not turn a committed deletion into a rejection.
+      await Promise.allSettled(pending)
+    }
   }
 
   private requireTable(): KvTable<SessionId, CheckpointRecord> {
