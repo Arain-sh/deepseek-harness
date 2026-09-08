@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "repository": "https://github.com/deepseek-ai/deepseek-harness.git",
+    "tag": "dsh-v0.1.1-rc.2",
+    "commit": "b150a551b8d465e31e418e1b2eaf5e79bbb7d28e"
+  },
+  "addedBundles": [],
+  "addedPackages": [
+    {
+      "name": "@deepseek-ai/dsh-session-deletion",
+      "path": "packages/session/session-deletion",
+      "purpose": "Host-only recursive Session-lineage deletion capability"
+    },
+    {
+      "name": "@deepseek-ai/dsh-shell-exec-env",
+      "path": "packages/shell/shell-exec-env",
+      "purpose": "Trusted per-execution environment registry for shell Consumers"
+    }
+  ],
+  "modifiedPackages": [
+    {
+      "name": "@deepseek-ai/dsh-agent",
+      "path": "packages/core/agent",
+      "source": ["src/index.ts"],
+      "purpose": "Expose live-Agent reservation for authorized Session deletion"
+    },
+    {
+      "name": "@deepseek-ai/dsh-agent-loop",
+      "path": "packages/core/agent-loop",
+      "source": ["src/agent.ts", "src/index.ts"],
+      "purpose": "Coordinate Agent lifecycle with Session deletion reservations"
+    },
+    {
+      "name": "@deepseek-ai/dsh-host-apiproxy",
+      "path": "packages/host/apiproxy",
+      "source": ["src/api-proxy.ts"],
+      "purpose": "Remove deleted Session workspace projections from the Host API"
+    },
+    {
+      "name": "@deepseek-ai/dsh-message-feedback",
+      "path": "packages/feedback/message-feedback",
+      "source": ["src/index.ts"],
+      "purpose": "Delete Session-owned feedback sidecars"
+    },
+    {
+      "name": "@deepseek-ai/dsh-session",
+      "path": "packages/core/session",
+      "source": ["src/index.ts"],
+      "purpose": "Reserve and remove Session families atomically in memory"
+    },
+    {
+      "name": "@deepseek-ai/dsh-session-persistence",
+      "path": "packages/session/session-persistence",
+      "source": ["src/coordinator.ts", "src/index.ts", "src/preparations.ts"],
+      "purpose": "Define deletion discovery and persistence deletion operations"
+    },
+    {
+      "name": "@deepseek-ai/dsh-session-persistence-jsonl",
+      "path": "packages/session/session-persistence-jsonl",
+      "source": ["src/index.ts"],
+      "purpose": "Delete owned JSONL Session artifacts without following links"
+    },
+    {
+      "name": "@deepseek-ai/dsh-session-persistence-sqlite",
+      "path": "packages/session/session-persistence-sqlite",
+      "source": ["src/index.ts", "src/sql.ts", "src/store.ts", "resources/sql/delete-session.sql"],
+      "purpose": "Delete Session rows transactionally from SQLite persistence"
+    },
+    {
+      "name": "@deepseek-ai/dsh-session-projection-cache",
+      "path": "packages/session/session-projection-cache",
+      "source": ["src/index.ts"],
+      "purpose": "Evict deleted Session projections and reject stale publication"
+    },
+    {
+      "name": "@deepseek-ai/dsh-session-query-sqlite",
+      "path": "packages/session-query/session-query-sqlite",
+      "source": ["src/index.ts"],
+      "purpose": "Remove deleted Sessions from the query index"
+    },
+    {
+      "name": "@deepseek-ai/dsh-tool-bash",
+      "path": "packages/shell/tool-bash",
+      "source": ["src/index.ts"],
+      "purpose": "Consume the optional trusted per-execution environment registry"
+    },
+    {
+      "name": "@deepseek-ai/dsh-tool-cordis",
+      "path": "packages/extensions/tool-cordis",
+      "source": ["src/api-catalog.ts"],
+      "purpose": "Project the fork's Session capability into the Cordis API catalog"
+    },
+    {
+      "name": "@deepseek-ai/dsh-tool-pwsh",
+      "path": "packages/shell/tool-pwsh",
+      "source": ["src/index.ts"],
+      "purpose": "Consume the optional trusted per-execution environment registry"
+    },
+    {
+      "name": "@deepseek-ai/dsh-workspace",
+      "path": "packages/workspace/workspace",
+      "source": ["src/index.ts"],
+      "purpose": "Remove deleted Session workspace metadata"
+    }
+  ],
+  "runtimePatchPackages": [
+    "@deepseek-ai/dsh-agent",
+    "@deepseek-ai/dsh-agent-loop",
+    "@deepseek-ai/dsh-host-apiproxy",
+    "@deepseek-ai/dsh-message-feedback",
+    "@deepseek-ai/dsh-session",
+    "@deepseek-ai/dsh-session-deletion",
+    "@deepseek-ai/dsh-session-persistence",
+    "@deepseek-ai/dsh-session-persistence-jsonl",
+    "@deepseek-ai/dsh-session-persistence-sqlite",
+    "@deepseek-ai/dsh-session-projection-cache",
+    "@deepseek-ai/dsh-session-query-sqlite",
+    "@deepseek-ai/dsh-shell-exec-env",
+    "@deepseek-ai/dsh-tool-bash",
+    "@deepseek-ai/dsh-tool-cordis",
+    "@deepseek-ai/dsh-tool-pwsh",
+    "@deepseek-ai/dsh-workspace"
+  ]
+}

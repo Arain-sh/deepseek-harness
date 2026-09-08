@@ -497,6 +497,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Plugins declare effect-scoped DSH_* facts; each shell tool collects one trusted snapshot per execution and its executor rebuilds the namespace.',
   },
   {
+    key: 'shellExecEnv',
+    pkg: 'shell-exec-env',
+    title: 'Trusted shell execution environment registry',
+    mode: 'core',
+    consumers: ['tool-bash', 'tool-pwsh'],
+    note: 'Trusted plugins resolve non-enumerable, non-DSH_* capabilities per execution; shell Consumers discover the optional registry without changing their model schemas.',
+  },
+  {
     key: 'terminals',
     pkg: 'terminal',
     title: 'Persistent PTY session registry',

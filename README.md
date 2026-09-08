@@ -14,6 +14,10 @@ DeepSeek Harness is in _developer preview_ and iterating rapidly. **THERE WILL B
 
 Review the [safety notice](SAFETY.md) before running the project.
 
+## Maintained fork
+
+This branch is maintained as the DSH Runtime fork used by SuperCode. It adds **no DSH bundle**; the added packages, modified production modules, exact official base, Runtime override set, and update rules are recorded in [the fork delta](FORK.md) and [`fork-manifest.json`](fork-manifest.json).
+
 ## Run
 
 ### Run from `npm`

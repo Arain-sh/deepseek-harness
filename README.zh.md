@@ -14,6 +14,10 @@ DeepSeek Harness 处于 _开发者预览_ 阶段，正在快速迭代。**未来
 
 运行本项目前，请阅读[安全说明](SAFETY.zh.md)。
 
+## 维护 fork
+
+此分支作为 SuperCode 使用的 DSH Runtime fork 维护。它**没有新增 DSH bundle**；新增 package、修改的生产模块、准确的官方基线、Runtime 覆盖集合与更新规则记录在 [fork 差异](FORK.md)和 [`fork-manifest.json`](fork-manifest.json)中。
+
 <a id="run"></a>
 
 ## 运行
