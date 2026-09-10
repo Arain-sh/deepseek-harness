@@ -2,7 +2,7 @@
 
 English | [中文](FORK.zh.md)
 
-This repository branch is the DSH Runtime fork used by SuperCode. [`fork-manifest.json`](fork-manifest.json) is the machine-readable inventory; this document explains its ownership and update rules. The fork is based on official `dsh-v0.1.1-rc.2` at `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`.
+This repository branch is the DSH Runtime fork used by SuperCode. [`fork-manifest.json`](fork-manifest.json) is the machine-readable inventory; this document explains its ownership and update rules. The fork is based on official `dsh-v0.1.5-rc.1` at `183f08e9c6dde7e36cd2318eaee70b0da08fb35e`.
 
 ## Bundle and package inventory
 

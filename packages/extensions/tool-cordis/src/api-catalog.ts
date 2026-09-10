@@ -301,6 +301,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the handle after setup, rollback-covered publication, and loop start complete.',
       },
       {
+        signature: 'reserveIdleDisposal(sessionId: SessionId): AgentIdleDisposalAttempt',
+        description: 'Atomically reserve a registry-owned Agent for idle disposal without exposing its teardown handle. Agents registered directly or created by a configuration helper have no retained handle and return `unowned`.',
+        parameters: [{ name: 'sessionId', description: 'live Agent identity to claim.' }],
+        returns: 'claimed reservation, busy state, or missing ownership.',
+      },
+      {
         signature: 'register(agent: Agent): () => void',
         description: 'Register a live agent. Throws if an agent with the same id is already registered. Emits `agent/created` on registration and `agent/disposed` when the calling fiber is disposed — both with the agent\'s scope carrier (`scopeTarget(agent, agent)`): the subject is the agent in hand, so the emits are scope-filtered regardless of which context invoked `register` (calling through `agent.ctx` scopes EFFECTS; dispatch scoping always requires passing the carrier). The entry is a runtime root; factory-backed creation uses `options.parentAgent` for child ownership. Returns the disposer.',
         parameters: [{ name: 'agent', description: 'the already-constructed agent to record in the store.' }],
@@ -1563,6 +1569,25 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'sessionDeletion',
+    summary: 'Host-only permanent Session deletion provider.',
+    description: 'Host-only permanent Session deletion provider. Product code validates placement and archive authority before invoking this service.',
+    methods: [
+      {
+        signature: 'async preview(rootSessionId: SessionId): Promise<SessionDeletionPreview>',
+        description: 'Resolve the current recursive deletion plan without reserving or mutating any Session.',
+        parameters: [{ name: 'rootSessionId', description: 'subtree root to inspect.' }],
+        returns: 'immutable ids in bottom-up deletion order.',
+      },
+      {
+        signature: 'async deleteTree(rootSessionId: SessionId): Promise<SessionDeletionResult>',
+        description: 'Permanently remove one Session subtree. All live members are claimed idle before any Agent is disposed; durable records then delete bottom-up. Retrying after partial storage success converges because missing children are skipped and the root remains last.',
+        parameters: [{ name: 'rootSessionId', description: 'subtree root to delete.' }],
+        returns: 'immutable plan and ids removed by this attempt.',
+      },
+    ],
+  },
+  {
     key: 'sessionFeedback',
     summary: 'Host Remote through which a product surface records a Session-level remark.',
     description: 'Host Remote through which a product surface records a Session-level remark.',
@@ -1594,6 +1619,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     description: 'Durable append-only session storage addressed through per-session handles.\n\nStorage semantics shared by every backend: events are contiguous from seq 0 and never rewritten; a torn physical tail is never returned to a reader and is truncated by the write path before its first append; reads validate current-format records only and refuse unknown vocabulary fail-closed. `append` persists best-effort; `flush` — per handle or service-wide — is the durability barrier.\n\nVisibility: a created session is observable through `stat`/`list`/`open` in this process from the moment `create` resolves, even while a backend defers physical materialization (a pure optimization); other processes see the session only once it materializes, and a session that never materialized before a crash never existed. `SessionHandle.flush` forces materialization.\n\nFreshness: once an `append` or `flush` resolves, reads started afterwards on this backend instance observe at least that prefix.',
     methods: [
       {
+        signature: 'readonly supportsDeletion: boolean = false',
+        description: 'Whether this backend implements permanent single-session deletion. Consumers probe this before starting a deletion transaction; the defaulted delete below rejects, so a backend that does not override both cannot silently claim support.',
+        parameters: [],
+      },
+      {
         signature: 'abstract create(header: SessionHeader, options?: SessionPersistenceCreateOptions): Promise<SessionHandle>',
         description: 'Create a new stored session and take its write ownership.',
         parameters: [{ name: 'header', description: 'the immutable header (id, version, cwd, lineage) to store.' }, { name: 'options', description: 'optional cancellation.' }],
@@ -1606,6 +1636,13 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'id', description: 'the stored session to open.' }, { name: 'access', description: '`read` or `write`.' }, { name: 'options', description: 'optional cancellation.' }],
         returns: 'the open handle.',
         throws: ['{SessionPersistenceNotFoundError} when the session does not exist.', '{SessionAlreadyOwnedError} for `write` when ownership is taken.'],
+      },
+      {
+        signature: 'delete(_id: SessionId, _options?: SessionPersistenceDeleteOptions): Promise<SessionHeader | undefined>',
+        description: 'Permanently remove one stored session and everything the backend holds for it. Whole-session removal is id-addressed like `create`/`stat`/`list` — it has no slice semantics and no handle could survive it — and it answers absence the way `stat` does, with `undefined` rather than a refusal.\n\nImplementations take the same single-writer claim `open(id, \'write\')` takes, so an active owner rejects instead of losing its bytes underneath it; the removal is durable when the returned promise resolves, and repeating it on an already-removed id is a no-op. On success the backend publishes `session-persistence/deleted` post-commit (see emitDeleted).\n\nThe default rejects: deletion is opt-in, so a third-party backend keeps compiling and keeps `supportsDeletion` false.',
+        parameters: [{ name: '_id', description: 'the stored session to remove.' }, { name: '_options', description: 'optional cancellation.' }],
+        returns: 'the removed session\'s stored header, or `undefined` when the session did not exist — or when it did, but its stored header was unreadable (an unsupported format generation, say): an artifact this build cannot interpret must still be removable, so a refusal costs the caller the header, never the removal. `stat` conflates the two the same way; `session-persistence/deleted` is the authoritative signal that something was removed.',
+        throws: ['{SessionAlreadyOwnedError} while a write handle owns the id.'],
       },
       {
         signature: 'abstract flush(): Promise<void>',
@@ -1914,6 +1951,19 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'All live sessions, in creation order.',
         parameters: [],
         returns: 'a fresh array; mutating it does not affect the store.',
+      },
+      {
+        signature: 'isDeletionReserved(id: SessionId): boolean',
+        description: 'Whether an active Host deletion reservation currently owns one exact id. Activity entry points consult this before prompting or resuming an existing live Agent; Session publication performs the stronger lineage check instead.',
+        parameters: [{ name: 'id', description: 'Session identity to inspect.' }],
+        returns: 'whether a deletion currently fences the id.',
+      },
+      {
+        signature: 'reserveForDeletion( rootSessionId: SessionId, initialSessionIds: readonly SessionId[] = [rootSessionId], ): SessionDeletionReservation',
+        description: 'Reserve a root and its known subtree against Session publication for one deletion transaction. The provider may SessionDeletionReservation.extend the set while repeated persistence snapshots converge on the real lineage; overlapping reservations reject synchronously, so two deletions can never share an identity.\n\nThe reservation is a fence, not a lock on storage: it stops NEW publication of the subtree, while the durable removal is excluded by persistence\'s own single-writer claim.',
+        parameters: [{ name: 'rootSessionId', description: 'subtree root.' }, { name: 'initialSessionIds', description: 'the root and already-discovered descendants.' }],
+        returns: 'the single-shot reservation capability; always `release()` it.',
+        throws: ['{SessionDeletionReservationError} `OVERLAPPING_SESSION_DELETION` when another active reservation already holds one of these identities.'],
       },
       {
         signature: 'fork(source: SessionForkSource, boundary?: SessionSeq, childSessionId?: SessionId): Session',
@@ -3174,6 +3224,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'summary', description: 'initial list row for the Session.' }],
   },
   {
+    name: 'api-session/deleted',
+    mode: 'emit',
+    signature: '\'api-session/deleted\'(sessionId: SessionId): void',
+    summary: 'A Session\'s durable record was permanently removed.',
+    description: 'A Session\'s durable record was permanently removed. Distinct from `api-session/removed`, which reports only that the Session left the live Host registry and says nothing about the durable record: a Session that was never live emits this and nothing else.',
+    parameters: [{ name: 'sessionId', description: 'permanently deleted Session identity.' }],
+  },
+  {
     name: 'api-session/error',
     mode: 'emit',
     signature: '\'api-session/error\'(sessionId: SessionId, message: string): void',
@@ -3356,6 +3414,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     summary: 'Waterfall around every streaming model call (retry, replay, routing).',
     description: 'Waterfall around every streaming model call (retry, replay, routing). Bound to the LlmRuntime; call `next()` to reach the resolved adapter\'s stream, or yield your own chunks to short-circuit.',
     parameters: [{ name: 'options', description: 'the full request. A LOOP-built request carries the process-local {@link markAgentLoopRequest} identity and arrives deep-frozen (mutation throws): its content is a pure function of the session log (the reconstructability Agent Note), so listeners read it, never rewrite it. Hand-built calls do not carry that marker; their messages already obey the immutable creation contract.' }],
+  },
+  {
+    name: 'session-persistence/deleted',
+    mode: 'parallel',
+    signature: '\'session-persistence/deleted\'(sessionId: SessionId): Promise<void> | void',
+    summary: 'Post-commit notification that one stored session was permanently removed.',
+    description: 'Post-commit notification that one stored session was permanently removed. Derived read models (search indexes, projection caches, workspace accounting) drop their row from this event; a listener failure is contained and cannot reverse the storage commit, so a listener must be idempotent and must not assume the record is still readable. Only the identity travels: by the time this fires the log is gone, so a header would name bytes no reader can reach.',
+    parameters: [{ name: 'sessionId', description: 'the permanently deleted session identity.' }],
   },
   {
     name: 'session-telemetry/record',
@@ -3607,7 +3673,15 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'AgentHandle',
-    declaration: 'export interface AgentHandle {\n    agent: Agent;\n    dispose(): Promise<void>;\n}',
+    declaration: 'export interface AgentHandle {\n    agent: Agent;\n    dispose(): Promise<void>;\n    reserveIdleDisposal?(): AgentIdleDisposalReservation | undefined;\n}',
+  },
+  {
+    name: 'AgentIdleDisposalAttempt',
+    declaration: 'export type AgentIdleDisposalAttempt = {\n    readonly kind: \'claimed\';\n    readonly reservation: AgentIdleDisposalReservation;\n} | {\n    readonly kind: \'busy\';\n} | {\n    readonly kind: \'unowned\';\n};',
+  },
+  {
+    name: 'AgentIdleDisposalReservation',
+    declaration: 'export interface AgentIdleDisposalReservation {\n    dispose(): Promise<void>;\n    release(): void;\n}',
   },
   {
     name: 'AgentOptions',
@@ -5114,6 +5188,18 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SessionCreateValue {\n    readonly sessionId: SessionId;\n    readonly agentPreset?: string;\n}',
   },
   {
+    name: 'SessionDeletionPreview',
+    declaration: 'export interface SessionDeletionPreview {\n    readonly rootSessionId: SessionId;\n    readonly sessionIds: readonly SessionId[];\n}',
+  },
+  {
+    name: 'SessionDeletionReservation',
+    declaration: 'export interface SessionDeletionReservation {\n    extend(sessionIds: readonly SessionId[]): void;\n    complete(sessionIds?: readonly SessionId[]): void;\n    release(): void;\n}',
+  },
+  {
+    name: 'SessionDeletionResult',
+    declaration: 'export interface SessionDeletionResult extends SessionDeletionPreview {\n    readonly deletedSessionIds: readonly SessionId[];\n}',
+  },
+  {
     name: 'SessionEvent',
     declaration: 'export type SessionEvent<T extends SessionEventType = SessionEventType> = {\n    [K in SessionEventType]: {\n        type: K;\n        seq: SessionSeq;\n        time: number;\n        data: SessionEventMap[K];\n        ignorable?: true;\n    } & (K extends SurfaceEventType ? SurfaceIntent<K> : {\n        surfaceOp?: never;\n        sourceEventSeqs?: never;\n    });\n}[T];',
   },
@@ -5308,6 +5394,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionPersistenceCreateOptions',
     declaration: 'export interface SessionPersistenceCreateOptions {\n    readonly signal?: AbortSignal;\n    readonly inheritedEventCount?: SessionLogOffset;\n}',
+  },
+  {
+    name: 'SessionPersistenceDeleteOptions',
+    declaration: 'export interface SessionPersistenceDeleteOptions {\n    readonly signal?: AbortSignal;\n}',
   },
   {
     name: 'SessionPersistenceListOptions',

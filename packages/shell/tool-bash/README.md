@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-tool-bash` lets an agent run one-shot `bash` commands and receive stdout, stderr, and exit markers. Each call uses a fresh shell, so cwd, variables, and functions do not persist; `run_in_background` starts long-running work that the agent can inspect with `job_output` and stop with `job_kill`. Commands receive the managed `DSH_*` environment, and sandbox denials can be retried once with wider `sandbox_permissions`, a `justification`, and user approval. Non-zero exits are reported as results, so the agent decides how to respond; use an executor such as `dsh-bash-local` or `dsh-bash-sandbox` and load `dsh-shell-env`. The optional [`dsh-shell-exec-env`](../shell-exec-env/README.md) registry is discovered dynamically rather than injected, so its absence never delays the tool.
+`dsh-tool-bash` lets an agent run one-shot `bash` commands and receive stdout, stderr, and exit markers. Each call uses a fresh shell, so cwd, variables, and functions do not persist; `run_in_background` starts long-running work that the agent can inspect with `job_output` and stop with `job_kill`. Commands receive the managed `DSH_*` environment, and sandbox denials can be retried once with wider `sandbox_permissions`, a `justification`, and user approval. Non-zero exits are reported as results, so the agent decides how to respond; use an executor such as `dsh-bash-local` or `dsh-bash-sandbox` and load `dsh-shell-env`.
 
 ## Table of Contents
 
@@ -25,7 +25,7 @@ English | [中文](README.zh.md)
 <a id="use-this-package"></a>
 ## Use this package
 
-Load this plugin in any composition where the agent should run bash commands: it registers the `bash` tool once an executor provider and the `dsh-shell-env` registry are mounted, and stays pending until the `tools`, `shell`, `systemPrompt`, and `shellEnv` services exist.
+Load this plugin in any composition where the agent should run bash commands: it registers the `bash` tool once an executor provider and the `dsh-shell-env` registry are mounted, and stays pending until the `tools`, `shell`, `systemPrompt`, and `shellEnv` services exist. The optional [`dsh-shell-exec-env`](../shell-exec-env/README.md) registry is discovered dynamically rather than injected, so its absence never delays the tool.
 
 ### Minimal configuration
 

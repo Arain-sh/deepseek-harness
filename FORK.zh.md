@@ -2,7 +2,7 @@
 
 [English](FORK.md) | 中文
 
-此仓库分支是 SuperCode 使用的 DSH Runtime fork。[`fork-manifest.json`](fork-manifest.json) 是机器可读清单，本文解释其所有权与更新规则。fork 基于官方 `dsh-v0.1.1-rc.2`，对应提交 `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`。
+此仓库分支是 SuperCode 使用的 DSH Runtime fork。[`fork-manifest.json`](fork-manifest.json) 是机器可读清单，本文解释其所有权与更新规则。fork 基于官方 `dsh-v0.1.5-rc.1`，对应提交 `183f08e9c6dde7e36cd2318eaee70b0da08fb35e`。
 
 ## Bundle 与 package 清单
 

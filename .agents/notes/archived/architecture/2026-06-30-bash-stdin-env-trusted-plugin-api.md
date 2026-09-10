@@ -17,7 +17,7 @@ Add `stdin?: string` and `env?: Record<string, string>` to **both** `ShellExecRe
 
 Three deliberate choices:
 
-1. **The model-facing tool omits `stdin` and `env`.** Shell syntax already covers those needs, so duplicate parameters would add surface without authority separation. The tool builds requests only from declared model arguments and trusted registries; direct callers may set the request fields themselves, while the optional [per-execution environment registry](2026-08-31-trusted-shell-execution-environment.md) supplies current Host-owned capabilities without adding a model argument. Harness-owned variables use the separate `dshEnv` channel from the [managed environment decision](../feature/2026-07-10-agent-session-identity-and-log-location.md), so ordinary `env` cannot replace them.
+1. **The model-facing tool omits `stdin` and `env`.** Shell syntax already covers those needs, so duplicate parameters would add surface without authority separation. The tool builds requests only from declared model arguments, signal, and owner; trusted in-process callers may set the request fields directly. Harness-owned variables use the separate `dshEnv` channel from the [managed environment decision](../feature/2026-07-10-agent-session-identity-and-log-location.md), so ordinary `env` cannot replace them.
 
 2. **`env` merges AFTER the credential scrub, so an explicit caller entry wins even on a credential-shaped name.** The later managed-namespace decision manages `DSH_*`: ambient entries are removed, and trusted `dshEnv` merges last, so an ordinary `env` entry can never displace a managed value. The complete order is `scrub(process.env, including DSH_*)` → `ENV_OVERRIDES` → ordinary `env` → `dshEnv`.
 

@@ -43,6 +43,13 @@ Source: [`packages/core/agent/src/index.ts`](../../packages/core/agent/src/index
 interface AgentHandle {
   agent: Agent
   dispose(): Promise<void>
+  /**
+   * Atomically reserve a truly idle Agent for permanent deletion. Implementors
+   * omit this capability when they cannot distinguish maintenance or queued
+   * input from public `idle` status.
+   * @returns a reservation, or `undefined` when work is active or queued.
+   */
+  reserveIdleDisposal?(): AgentIdleDisposalReservation | undefined
 }
 ```
 

@@ -34,4 +34,4 @@ shell 工具 schema 保持不变，并通过具名模型参数构建请求。额
 
 ## 后果
 
-仓库外插件可以提供当前能力，而无需导入 shell 工具内部实现或修改全局状态。DSH 改动保持通用：它定义一个可选注册表和两个 Consumer 钩子，不包含特定 Provider 或 Product 的鉴权逻辑。只有挂载该服务时，解析延迟才会加入调用；Provider 失败会有意使命令不可用，而不会回退到陈旧或环境凭证。普通 `ShellExecRequest.env` 行为及其合并顺序仍由 [stdin 与环境决策](2026-06-30-bash-stdin-env-trusted-plugin-api.zh.md)规定。
+仓库外插件可以提供当前能力，而无需导入 shell 工具内部实现或修改全局状态。DSH 改动保持通用：它定义一个可选注册表和两个 Consumer 钩子，不包含特定 Provider 或 Product 的鉴权逻辑。只有挂载该服务时，解析延迟才会加入调用；Provider 失败会有意使命令不可用，而不会回退到陈旧或环境凭证。普通 `ShellExecRequest.env` 行为及其合并顺序仍由 [stdin 与环境决策](../../archived/architecture/2026-06-30-bash-stdin-env-trusted-plugin-api.md)规定。

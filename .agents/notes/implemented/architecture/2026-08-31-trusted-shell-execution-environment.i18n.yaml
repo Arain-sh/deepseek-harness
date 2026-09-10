@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-31-trusted-shell-execution-environment.md
-2026-08-31-trusted-shell-execution-environment.md: a469fe959e4f81399f79694e527691e6b43bf806
-2026-08-31-trusted-shell-execution-environment.zh.md: f0b6aa7f64b9f6232bcd14f177243b057046afce
+2026-08-31-trusted-shell-execution-environment.md: 05f6d43ed1ca744777b5dd95ec8c104b5bd65acc
+2026-08-31-trusted-shell-execution-environment.zh.md: 4adbc8b8c2173b982924b2a2d25a227325f20745
