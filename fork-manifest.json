@@ -58,6 +58,14 @@
       "purpose": "Publish Session deletion over the Session controller and project it into the Client list"
     },
     {
+      "name": "@deepseek-ai/dsh-client-connection",
+      "path": "packages/client/connection",
+      "source": [
+        "src/rpc-host.ts"
+      ],
+      "purpose": "Register RPC channels through a scoped webServer inject so any consumer can open one"
+    },
+    {
       "name": "@deepseek-ai/dsh-session",
       "path": "packages/core/session",
       "source": [
@@ -135,6 +143,7 @@
     "@deepseek-ai/dsh-agent-loop",
     "@deepseek-ai/dsh-api-remotes",
     "@deepseek-ai/dsh-api-session-controller",
+    "@deepseek-ai/dsh-client-connection",
     "@deepseek-ai/dsh-session",
     "@deepseek-ai/dsh-session-deletion",
     "@deepseek-ai/dsh-session-persistence",

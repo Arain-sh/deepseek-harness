@@ -175,10 +175,20 @@ export class HostConnectionService extends Service implements HostConnectionHand
         await bridge(req, res, fetchHandler)
       },
     }
-    return owner.effect(
-      () => owner.webServer.register(route),
-      `client-connection: ${channel} rpc channel`,
-    )
+    // The caller's fiber declares `connection`, not `webServer`, so reading the
+    // web server off it directly throws "cannot get property without inject"
+    // for every consumer of this API. The plugin already reaches the service
+    // the correct way for its own `/api` route (src/index.ts:119): through a
+    // scoped inject that waits for it and declares the read. Channel
+    // registration takes the same route, so a channel outlives the wait and is
+    // torn down with its owner.
+    const scope = owner.inject(['webServer'], (webCtx) => {
+      webCtx.effect(
+        () => webCtx.webServer.register(route),
+        `client-connection: ${channel} rpc channel`,
+      )
+    })
+    return async () => { await scope.dispose() }
   }
 
   private registerInterceptor(
