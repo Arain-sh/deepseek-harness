@@ -4,7 +4,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import AgentRegistry, { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import SessionStore, { SESSION_FORMAT_VERSION, SessionId, type Session, type SessionHeader } from '@deepseek-ai/dsh-session'
@@ -111,7 +111,10 @@ function registerIdleAgent(ctx: Context, session: Session): { readonly agent: Ag
     id: session.id,
     options: {},
     session,
-    inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+    // 0.1.5 turned `Inbox` into an interface on the runtime types; it is no
+    // longer constructible. Upstream's own Agent double builds the same
+    // literal (`packages/core/agent/tests/agent.spec.ts:24-26`).
+    inbox: { nextTurn: [], nextStep: [] } as never,
     status: 'idle',
     ctx,
     send: () => {},
